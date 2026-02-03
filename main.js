@@ -48,9 +48,6 @@ async function createWindow() {
   });
 
   mainWindow.loadFile('dist/index.html');
-
-  // Open DevTools in development
-  mainWindow.webContents.openDevTools();
 }
 
 // Window control handlers

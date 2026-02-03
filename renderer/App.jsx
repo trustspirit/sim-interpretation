@@ -7,7 +7,10 @@ import {
   ArrowLeftRight,
   ChevronDown,
   X,
-  Circle
+  Circle,
+  Type,
+  ArrowDown,
+  ArrowUp
 } from 'lucide-react';
 
 // Language configuration
@@ -165,6 +168,8 @@ export default function App() {
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
   const [currentTranslation, setCurrentTranslation] = useState('');
+  const [fontSize, setFontSize] = useState(2); // 0: small, 1: medium, 2: large, 3: x-large
+  const [textDirection, setTextDirection] = useState('down'); // 'down': top to bottom, 'up': bottom to top
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -428,12 +433,43 @@ export default function App() {
     setOutputLang(inputLang);
   };
 
-  // Auto-scroll when content changes
+  const increaseFontSize = () => {
+    if (fontSize < 3) setFontSize(fontSize + 1);
+  };
+
+  const decreaseFontSize = () => {
+    if (fontSize > 0) setFontSize(fontSize - 1);
+  };
+
+  const getFontSizeClasses = () => {
+    const sizes = {
+      current: ['text-2xl', 'text-3xl', 'text-4xl', 'text-5xl'],
+      previous: ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl'],
+      cursor: ['h-6', 'h-8', 'h-10', 'h-12']
+    };
+    return {
+      current: sizes.current[fontSize],
+      previous: sizes.previous[fontSize],
+      cursor: sizes.cursor[fontSize]
+    };
+  };
+
+  const toggleTextDirection = () => {
+    setTextDirection(prev => prev === 'down' ? 'up' : 'down');
+  };
+
+  // Keep current text centered by scrolling
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      if (textDirection === 'down') {
+        // Scroll to bottom for top-to-bottom flow
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      } else {
+        // Scroll to top for bottom-to-top flow
+        scrollRef.current.scrollTop = 0;
+      }
     }
-  }, [translatedText, currentTranslation]);
+  }, [translatedText, currentTranslation, textDirection]);
 
   useEffect(() => {
     if (isListening && analyserRef.current) {
@@ -507,34 +543,92 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-h-0 p-4">
-        {/* Translation Display */}
+        {/* Translation Display - Teleprompter Style */}
         <div className="flex-1 flex flex-col min-h-0 mb-4">
-          <div ref={scrollRef} className="flex-1 bg-codex-surface border border-codex-border rounded-lg p-5 overflow-y-auto">
+          <div ref={scrollRef} className="flex-1 bg-codex-surface border border-codex-border rounded-xl p-8 overflow-y-auto flex flex-col">
             {translatedText.length === 0 && !currentTranslation ? (
-              <div className="h-full flex items-center justify-center">
-                <p className="text-codex-muted text-sm">
-                  {isListening ? 'Listening for speech...' : 'Press Start to begin'}
+              <div className="flex-1 flex items-center justify-center">
+                <p className="text-codex-muted text-base">
+                  {isListening ? 'Listening...' : 'Press Start to begin'}
                 </p>
               </div>
+            ) : textDirection === 'down' ? (
+              <>
+                {/* Top-to-bottom flow: Spacer at top */}
+                <div className="flex-1 min-h-0" />
+                
+                <div className="space-y-6 text-center">
+                  {/* All previous translations - scrollable */}
+                  {translatedText.map((text, i, arr) => {
+                    const isLast = i === arr.length - 1 && !currentTranslation;
+                    const opacity = isLast ? 1 : 0.4 + (i / arr.length) * 0.4;
+                    const fontClasses = getFontSizeClasses();
+                    return (
+                      <p
+                        key={i}
+                        className={`leading-relaxed transition-all duration-300 ${
+                          isLast ? `${fontClasses.current} font-semibold text-codex-text` : `${fontClasses.previous} text-codex-text`
+                        }`}
+                        style={{ opacity }}
+                      >
+                        {text}
+                      </p>
+                    );
+                  })}
+                  {/* Current streaming translation */}
+                  {currentTranslation && (
+                    <p className={`${getFontSizeClasses().current} font-semibold leading-relaxed text-codex-text`}>
+                      {currentTranslation}
+                      <span className={`inline-block w-[4px] ${getFontSizeClasses().cursor} bg-codex-live ml-1.5 animate-blink`} />
+                    </p>
+                  )}
+                </div>
+                
+                {/* Spacer to center content */}
+                <div className="flex-1 min-h-0" />
+              </>
             ) : (
-              <div className="space-y-2">
-                {translatedText.map((text, i) => (
-                  <p key={i} className="text-lg leading-relaxed text-codex-text animate-fade-in">{text}</p>
-                ))}
-                {currentTranslation && (
-                  <p className="text-lg leading-relaxed text-codex-text-secondary">
-                    {currentTranslation}
-                    <span className="inline-block w-[2px] h-5 bg-codex-text ml-0.5 animate-blink" />
-                  </p>
-                )}
-              </div>
+              <>
+                {/* Bottom-to-top flow: Spacer at bottom */}
+                <div className="flex-1 min-h-0" />
+                
+                <div className="space-y-6 text-center">
+                  {/* Current streaming translation at top */}
+                  {currentTranslation && (
+                    <p className={`${getFontSizeClasses().current} font-semibold leading-relaxed text-codex-text`}>
+                      {currentTranslation}
+                      <span className={`inline-block w-[4px] ${getFontSizeClasses().cursor} bg-codex-live ml-1.5 animate-blink`} />
+                    </p>
+                  )}
+                  {/* All previous translations in reverse order */}
+                  {[...translatedText].reverse().map((text, i, arr) => {
+                    const isFirst = i === 0 && !currentTranslation;
+                    const opacity = isFirst ? 1 : 0.4 + ((arr.length - i) / arr.length) * 0.4;
+                    const fontClasses = getFontSizeClasses();
+                    return (
+                      <p
+                        key={translatedText.length - 1 - i}
+                        className={`leading-relaxed transition-all duration-300 ${
+                          isFirst ? `${fontClasses.current} font-semibold text-codex-text` : `${fontClasses.previous} text-codex-text`
+                        }`}
+                        style={{ opacity }}
+                      >
+                        {text}
+                      </p>
+                    );
+                  })}
+                </div>
+                
+                {/* Spacer at bottom */}
+                <div className="flex-1 min-h-0" />
+              </>
             )}
           </div>
 
-          {/* Original Text */}
-          <div className="mt-3 px-2 py-2 bg-codex-surface/50 rounded-md">
-            <p className="text-sm text-codex-text-secondary">
-              {originalText.length > 0 ? originalText.slice(-2).join(' ') : 'Original will appear here...'}
+          {/* Original Text - Subtitle style */}
+          <div className="mt-4 text-center">
+            <p className="text-base text-codex-text-secondary/80 italic">
+              {originalText.length > 0 ? `"${originalText.slice(-1)[0]}"` : ''}
             </p>
           </div>
         </div>
@@ -558,6 +652,36 @@ export default function App() {
               <span>Stop</span>
             </button>
           )}
+          <div className="flex items-center gap-1 bg-codex-surface border border-codex-border rounded-lg">
+            <button
+              onClick={decreaseFontSize}
+              disabled={fontSize === 0}
+              className={`p-2.5 text-codex-muted hover:text-codex-text transition-colors rounded-l-lg ${
+                fontSize === 0 ? 'opacity-40 cursor-not-allowed' : ''
+              }`}
+              title="Decrease font size"
+            >
+              <Type size={14} />
+            </button>
+            <div className="w-px h-4 bg-codex-border" />
+            <button
+              onClick={increaseFontSize}
+              disabled={fontSize === 3}
+              className={`p-2.5 text-codex-muted hover:text-codex-text transition-colors rounded-r-lg ${
+                fontSize === 3 ? 'opacity-40 cursor-not-allowed' : ''
+              }`}
+              title="Increase font size"
+            >
+              <Type size={18} />
+            </button>
+          </div>
+          <button
+            onClick={toggleTextDirection}
+            className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
+            title={textDirection === 'down' ? 'Top to bottom' : 'Bottom to top'}
+          >
+            {textDirection === 'down' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+          </button>
           <button
             onClick={clearTranscripts}
             className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
