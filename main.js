@@ -1,4 +1,4 @@
-import { app, BrowserWindow, systemPreferences, session } from 'electron';
+import { app, BrowserWindow, systemPreferences, session, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -26,8 +26,8 @@ async function createWindow() {
     height: 700,
     minWidth: 600,
     minHeight: 500,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    frame: false,
+    transparent: false,
     backgroundColor: '#0a0a0a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -49,9 +49,26 @@ async function createWindow() {
 
   mainWindow.loadFile('dist/index.html');
 
-  // Open DevTools in development (uncomment if needed)
-  // mainWindow.webContents.openDevTools();
+  // Open DevTools in development
+  mainWindow.webContents.openDevTools();
 }
+
+// Window control handlers
+ipcMain.on('window-close', () => {
+  mainWindow?.close();
+});
+
+ipcMain.on('window-minimize', () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.on('window-maximize', () => {
+  if (mainWindow?.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow?.maximize();
+  }
+});
 
 app.whenReady().then(createWindow);
 
