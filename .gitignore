@@ -1,6 +1,7 @@
 node_modules/
 .env
 dist/
+release/
 .DS_Store
 
 settings.local.json

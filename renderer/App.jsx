@@ -12,7 +12,11 @@ import {
   ArrowUp,
   Settings,
   PanelTop,
-  Maximize2
+  Maximize2,
+  Volume2,
+  VolumeX,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 // Language configuration
@@ -82,6 +86,117 @@ function AudioWave({ isActive, audioLevel }) {
           />
         );
       })}
+    </div>
+  );
+}
+
+// Voice selector for TTS
+const voiceOptions = [
+  { code: 'alloy', name: 'Alloy', desc: 'Neutral' },
+  { code: 'echo', name: 'Echo', desc: 'Male' },
+  { code: 'fable', name: 'Fable', desc: 'British' },
+  { code: 'onyx', name: 'Onyx', desc: 'Deep male' },
+  { code: 'nova', name: 'Nova', desc: 'Female' },
+  { code: 'shimmer', name: 'Shimmer', desc: 'Soft female' },
+];
+
+function VoiceSelector({ value, onChange, disabled }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const selected = voiceOptions.find(v => v.code === value) || voiceOptions[4];
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        disabled={disabled}
+        className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all ${
+          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
+        } bg-codex-surface border border-codex-border`}
+      >
+        <Volume2 size={12} className="text-codex-muted" />
+        <span className="text-codex-text">{selected.name}</span>
+        <ChevronDown size={10} className={`text-codex-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {isOpen && !disabled && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
+          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-32">
+            {voiceOptions.map((voice) => (
+              <button
+                key={voice.code}
+                onClick={() => {
+                  onChange(voice.code);
+                  localStorage.setItem('translatorVoice', voice.code);
+                  setIsOpen(false);
+                }}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                  value === voice.code ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
+                }`}
+              >
+                <div className="flex justify-between items-center">
+                  <span>{voice.name}</span>
+                  <span className="text-[10px] text-codex-muted">{voice.desc}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Speed selector for TTS
+const speedOptions = [
+  { value: 0.5, label: '0.5x', desc: 'Slow' },
+  { value: 0.75, label: '0.75x', desc: '' },
+  { value: 1.0, label: '1x', desc: 'Normal' },
+  { value: 1.25, label: '1.25x', desc: '' },
+  { value: 1.5, label: '1.5x', desc: 'Fast' },
+  { value: 2.0, label: '2x', desc: 'Very fast' },
+];
+
+function SpeedSelector({ value, onChange, disabled }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const selected = speedOptions.find(s => s.value === value) || speedOptions[2];
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        disabled={disabled}
+        className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-all ${
+          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
+        } bg-codex-surface border border-codex-border`}
+      >
+        <span className="text-codex-text">{selected.label}</span>
+        <ChevronDown size={10} className={`text-codex-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {isOpen && !disabled && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
+          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-20">
+            {speedOptions.map((speed) => (
+              <button
+                key={speed.value}
+                onClick={() => {
+                  onChange(speed.value);
+                  localStorage.setItem('translatorVoiceSpeed', speed.value.toString());
+                  setIsOpen(false);
+                }}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                  value === speed.value ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
+                }`}
+              >
+                <div className="flex justify-between items-center gap-2">
+                  <span>{speed.label}</span>
+                  {speed.desc && <span className="text-[10px] text-codex-muted">{speed.desc}</span>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -208,6 +323,11 @@ export default function App() {
   const [direction, setDirection] = useState(() => localStorage.getItem('translatorDirection') || 'auto');
   const [subtitleQueue, setSubtitleQueue] = useState([]);
   const [currentSubtitle, setCurrentSubtitle] = useState('');
+  const [isVoiceMode, setIsVoiceMode] = useState(false);
+  const [voiceType, setVoiceType] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
+  const [voiceSpeed, setVoiceSpeed] = useState(() => parseFloat(localStorage.getItem('translatorVoiceSpeed')) || 1.0);
+  const [isSpeakingTTS, setIsSpeakingTTS] = useState(false);
+  const [voiceOnlyMode, setVoiceOnlyMode] = useState(() => localStorage.getItem('translatorVoiceOnly') === 'true');
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -227,6 +347,10 @@ export default function App() {
   const subtitleTimerRef = useRef(null);
   const subtitleQueueRef = useRef([]);
   const lastProcessedIndexRef = useRef(-1);
+  const ttsQueueRef = useRef([]);
+  const ttsAudioRef = useRef(null);
+  const isPlayingTTSRef = useRef(false);
+  const lastTTSIndexRef = useRef(-1);
   const isProcessingQueueRef = useRef(false);
   const subtitleContainerRef = useRef(null);
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
@@ -710,6 +834,108 @@ export default function App() {
     }
   }, [isSubtitleMode]);
 
+  // TTS (Text-to-Speech) functions
+  const playTTS = useCallback(async (text) => {
+    const key = apiKey || envApiKey;
+    if (!key || !text) return;
+
+    try {
+      setIsSpeakingTTS(true);
+      const response = await fetch('https://api.openai.com/v1/audio/speech', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'tts-1',
+          voice: voiceType,
+          speed: voiceSpeed,
+          input: text,
+        }),
+      });
+
+      if (!response.ok) throw new Error('TTS request failed');
+
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+
+      if (ttsAudioRef.current) {
+        ttsAudioRef.current.pause();
+        URL.revokeObjectURL(ttsAudioRef.current.src);
+      }
+
+      const audio = new Audio(audioUrl);
+      ttsAudioRef.current = audio;
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+        setIsSpeakingTTS(false);
+        isPlayingTTSRef.current = false;
+        // Process next in queue
+        processNextTTS();
+      };
+
+      audio.onerror = () => {
+        setIsSpeakingTTS(false);
+        isPlayingTTSRef.current = false;
+        processNextTTS();
+      };
+
+      await audio.play();
+    } catch (error) {
+      console.error('TTS error:', error);
+      setIsSpeakingTTS(false);
+      isPlayingTTSRef.current = false;
+      processNextTTS();
+    }
+  }, [apiKey, envApiKey, voiceType, voiceSpeed]);
+
+  const processNextTTS = useCallback(() => {
+    if (ttsQueueRef.current.length === 0) {
+      isPlayingTTSRef.current = false;
+      return;
+    }
+    const nextText = ttsQueueRef.current.shift();
+    playTTS(nextText);
+  }, [playTTS]);
+
+  const startTTSProcessing = useCallback(() => {
+    if (isPlayingTTSRef.current) return;
+    if (ttsQueueRef.current.length === 0) return;
+    isPlayingTTSRef.current = true;
+    processNextTTS();
+  }, [processNextTTS]);
+
+  // Queue translations for TTS when voice mode is enabled
+  useEffect(() => {
+    if (!isVoiceMode) return;
+    if (currentTranslation) return; // Wait for complete translation
+
+    const latestIndex = translatedText.length - 1;
+    if (latestIndex < 0 || latestIndex <= lastTTSIndexRef.current) return;
+
+    const newText = translatedText[latestIndex];
+    lastTTSIndexRef.current = latestIndex;
+
+    ttsQueueRef.current.push(newText);
+    startTTSProcessing();
+  }, [isVoiceMode, translatedText, currentTranslation, startTTSProcessing]);
+
+  // Stop TTS when voice mode is disabled
+  useEffect(() => {
+    if (!isVoiceMode) {
+      if (ttsAudioRef.current) {
+        ttsAudioRef.current.pause();
+        ttsAudioRef.current = null;
+      }
+      ttsQueueRef.current = [];
+      lastTTSIndexRef.current = -1;
+      isPlayingTTSRef.current = false;
+      setIsSpeakingTTS(false);
+    }
+  }, [isVoiceMode]);
+
   // Subtitle Mode UI
   const subtitleHoverTimeoutRef = useRef(null);
   
@@ -898,7 +1124,18 @@ export default function App() {
         {/* Translation Display - Teleprompter Style */}
         <div className="flex-1 flex flex-col min-h-0 mb-4">
           <div ref={scrollRef} className="flex-1 bg-codex-surface border border-codex-border rounded-xl p-8 overflow-y-auto flex flex-col">
-            {translatedText.length === 0 && !currentTranslation ? (
+            {isVoiceMode && voiceOnlyMode ? (
+              <div className="flex-1 flex flex-col items-center justify-center gap-4">
+                <div className={`w-20 h-20 rounded-full flex items-center justify-center ${
+                  isSpeakingTTS ? 'bg-codex-live/20 animate-pulse' : 'bg-codex-elevated'
+                }`}>
+                  <Volume2 size={40} className={isSpeakingTTS ? 'text-codex-live' : 'text-codex-muted'} />
+                </div>
+                <p className="text-codex-muted text-lg">
+                  {isSpeakingTTS ? 'Speaking...' : isListening ? 'Listening...' : 'Voice mode active'}
+                </p>
+              </div>
+            ) : translatedText.length === 0 && !currentTranslation ? (
               <div className="flex-1 flex items-center justify-center">
                 <p className="text-codex-muted text-base">
                   {isListening ? 'Listening...' : 'Press Start to begin'}
@@ -1041,6 +1278,40 @@ export default function App() {
           >
             <PanelTop size={16} />
           </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsVoiceMode(!isVoiceMode)}
+              className={`p-2.5 border rounded-lg transition-colors ${
+                isVoiceMode
+                  ? 'bg-codex-live/20 border-codex-live text-codex-live'
+                  : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
+              }`}
+              title={isVoiceMode ? 'Voice mode ON' : 'Voice mode OFF'}
+            >
+              {isVoiceMode ? <Volume2 size={16} /> : <VolumeX size={16} />}
+            </button>
+            {isVoiceMode && (
+              <>
+                <VoiceSelector value={voiceType} onChange={setVoiceType} disabled={isSpeakingTTS} />
+                <SpeedSelector value={voiceSpeed} onChange={setVoiceSpeed} disabled={isSpeakingTTS} />
+                <button
+                  onClick={() => {
+                    const newValue = !voiceOnlyMode;
+                    setVoiceOnlyMode(newValue);
+                    localStorage.setItem('translatorVoiceOnly', newValue.toString());
+                  }}
+                  className={`p-2 border rounded-lg transition-colors ${
+                    voiceOnlyMode
+                      ? 'bg-codex-live/20 border-codex-live text-codex-live'
+                      : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
+                  }`}
+                  title={voiceOnlyMode ? 'Text hidden (voice only)' : 'Text visible'}
+                >
+                  {voiceOnlyMode ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </>
+            )}
+          </div>
           <button
             onClick={clearTranscripts}
             className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
