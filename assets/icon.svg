@@ -1,35 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
   <defs>
-    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#8b5cf6"/>
+    <linearGradient id="bgGrad8" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#ec4899"/>
     </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="4" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.3"/>
-    </filter>
   </defs>
   
   <!-- Background rounded square -->
-  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bgGrad)"/>
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="url(#bgGrad8)"/>
   
-  <!-- Left speech bubble (behind) -->
-  <path d="M70 100 Q70 60 110 60 L250 60 Q290 60 290 100 L290 180 Q290 220 250 220 L150 220 L110 270 L110 220 Q70 220 70 180 Z" 
-        fill="white" filter="url(#shadow)"/>
+  <!-- Script/text panel (behind, rotated) -->
+  <g transform="rotate(6, 291, 301)">
+    <rect x="196" y="216" width="190" height="170" rx="16" fill="white"/>
+    
+    <!-- Simple text lines -->
+    <line x1="221" y1="260" x2="361" y2="260" stroke="#ec4899" stroke-width="12" stroke-linecap="round"/>
+    <line x1="221" y1="300" x2="331" y2="300" stroke="#f97316" stroke-width="12" stroke-linecap="round"/>
+    <line x1="221" y1="340" x2="351" y2="340" stroke="#ec4899" stroke-width="12" stroke-linecap="round"/>
+  </g>
   
-  <!-- "Aa" text symbol in left bubble -->
-  <text x="180" y="165" font-family="Georgia, serif" font-size="76" font-weight="bold" fill="#6366f1" text-anchor="middle">Aa</text>
-  
-  <!-- Right speech bubble (front) with stroke for edge definition -->
-  <path d="M222 240 Q222 200 262 200 L402 200 Q442 200 442 240 L442 340 Q442 380 402 380 L362 430 L362 380 L262 380 Q222 380 222 340 Z" 
-        fill="white" stroke="#e0e0e0" stroke-width="2" filter="url(#shadow)"/>
-  
-  <!-- Globe icon in right bubble -->
-  <g transform="translate(332, 290)">
-    <circle cx="0" cy="0" r="50" fill="none" stroke="#8b5cf6" stroke-width="6"/>
-    <ellipse cx="0" cy="0" rx="22" ry="50" fill="none" stroke="#8b5cf6" stroke-width="4"/>
-    <line x1="-50" y1="0" x2="50" y2="0" stroke="#8b5cf6" stroke-width="4"/>
-    <path d="M-42 -28 Q0 -20 42 -28" fill="none" stroke="#8b5cf6" stroke-width="3"/>
-    <path d="M-42 28 Q0 20 42 28" fill="none" stroke="#8b5cf6" stroke-width="3"/>
+  <!-- Speech bubble (front, rotated) -->
+  <g transform="rotate(-5, 226, 200)">
+    <!-- Background color outline for gap effect -->
+    <path d="M126 154 Q126 126 154 126 L298 126 Q326 126 326 154 L326 233 Q326 261 298 261 L196 261 L166 301 L166 261 L154 261 Q126 261 126 233 Z" 
+          fill="white" stroke="url(#bgGrad8)" stroke-width="8"/>
+    
+    <!-- Waveform inside bubble -->
+    <g fill="#f97316">
+      <rect x="151" y="166" width="14" height="50" rx="7"/>
+      <rect x="176" y="153" width="14" height="76" rx="7"/>
+      <rect x="201" y="139" width="14" height="104" rx="7"/>
+      <rect x="226" y="156" width="14" height="70" rx="7"/>
+      <rect x="251" y="144" width="14" height="94" rx="7"/>
+      <rect x="276" y="161" width="14" height="60" rx="7"/>
+    </g>
   </g>
 </svg>
