@@ -10,7 +10,11 @@ import {
   Circle,
   Type,
   ArrowDown,
-  ArrowUp
+  ArrowUp,
+  Settings,
+  Key,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 
 // Language configuration
@@ -84,31 +88,80 @@ function AudioWave({ isActive, audioLevel }) {
   );
 }
 
-// Microphone popover
-function MicrophonePopover({ isOpen, onClose, microphones, selectedMic, onSelectMic }) {
+// Settings popover
+function SettingsPopover({ 
+  isOpen, onClose, microphones, selectedMic, onSelectMic,
+  apiKey, onApiKeyChange, hasEnvKey, showApiKey, setShowApiKey,
+  customInstruction, onCustomInstructionChange 
+}) {
   if (!isOpen) return null;
 
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div className="absolute top-full right-0 mt-2 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-2xl p-2 min-w-56 animate-fade-in">
-        <div className="px-2 py-1.5 mb-1">
-          <span className="text-2xs font-medium text-codex-muted uppercase tracking-wider">Input Device</span>
-        </div>
-        <div className="space-y-0.5">
-          {microphones.map((mic) => (
+      <div className="absolute top-full right-0 mt-2 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-2xl p-3 w-80 animate-fade-in max-h-[80vh] overflow-y-auto">
+        <div className="mb-4">
+          <div className="flex items-center gap-2 px-1 py-1.5 mb-2">
+            <Key size={14} className="text-codex-muted" />
+            <span className="text-xs font-medium text-codex-muted uppercase tracking-wider">OpenAI API Key</span>
+          </div>
+          <div className="relative">
+            <input
+              type={showApiKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={(e) => onApiKeyChange(e.target.value)}
+              placeholder={hasEnvKey ? 'Using .env file' : 'sk-...'}
+              className="w-full px-3 py-2 pr-10 bg-codex-surface border border-codex-border rounded-lg text-sm text-codex-text placeholder-codex-muted/50 focus:outline-none focus:border-codex-border-hover"
+            />
             <button
-              key={mic.deviceId}
-              onClick={() => { onSelectMic(mic.deviceId); onClose(); }}
-              className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors ${
-                selectedMic === mic.deviceId
-                  ? 'bg-white/10 text-codex-text'
-                  : 'text-codex-text-secondary hover:bg-white/5'
-              }`}
+              type="button"
+              onClick={() => setShowApiKey(!showApiKey)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-codex-muted hover:text-codex-text"
             >
-              {mic.label || `Microphone ${mic.index + 1}`}
+              {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
-          ))}
+          </div>
+          {hasEnvKey && !apiKey && (
+            <p className="mt-1.5 text-2xs text-codex-muted">Using key from .env file</p>
+          )}
+        </div>
+
+        <div className="h-px bg-codex-border mb-4" />
+
+        <div className="mb-4">
+          <div className="flex items-center gap-2 px-1 py-1.5 mb-2">
+            <Mic size={14} className="text-codex-muted" />
+            <span className="text-xs font-medium text-codex-muted uppercase tracking-wider">Microphone</span>
+          </div>
+          <div className="space-y-0.5">
+            {microphones.map((mic) => (
+              <button
+                key={mic.deviceId}
+                onClick={() => onSelectMic(mic.deviceId)}
+                className={`w-full text-left px-2 py-1.5 rounded text-sm transition-colors ${
+                  selectedMic === mic.deviceId
+                    ? 'bg-white/10 text-codex-text'
+                    : 'text-codex-text-secondary hover:bg-white/5'
+                }`}
+              >
+                {mic.label || `Microphone ${mic.index + 1}`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="h-px bg-codex-border mb-4" />
+
+        <div>
+          <div className="px-1 py-1.5 mb-2">
+            <span className="text-xs font-medium text-codex-muted uppercase tracking-wider">Translation Instructions</span>
+          </div>
+          <textarea
+            value={customInstruction}
+            onChange={(e) => onCustomInstructionChange(e.target.value)}
+            placeholder="Add context for better translations..."
+            className="w-full h-24 px-3 py-2 bg-codex-surface border border-codex-border rounded-lg text-sm text-codex-text placeholder-codex-muted/50 resize-none focus:outline-none focus:border-codex-border-hover"
+          />
         </div>
       </div>
     </>
@@ -158,12 +211,16 @@ function LanguageSelector({ value, onChange, disabled }) {
 export default function App() {
   const [status, setStatus] = useState('ready');
   const [statusText, setStatusText] = useState('Ready');
-  const [inputLang, setInputLang] = useState('en');
-  const [outputLang, setOutputLang] = useState('ko');
+  const [langA, setLangA] = useState('en');
+  const [langB, setLangB] = useState('ko');
   const [isListening, setIsListening] = useState(false);
   const [microphones, setMicrophones] = useState([]);
   const [selectedMic, setSelectedMic] = useState('');
-  const [showMicSettings, setShowMicSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('translatorApiKey') || '');
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [customInstruction, setCustomInstruction] = useState(() => localStorage.getItem('translatorInstruction') || '');
+  const envApiKey = window.electronAPI?.getApiKey?.() || '';
   const [audioLevel, setAudioLevel] = useState(0);
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
@@ -329,25 +386,29 @@ export default function App() {
 
   const connectWebSocket = useCallback(() => {
     return new Promise((resolve, reject) => {
-      const apiKey = window.electronAPI.getApiKey();
-      if (!apiKey) {
+      const key = apiKey || envApiKey;
+      if (!key) {
         updateStatus('error', 'API Key missing');
         reject(new Error('API Key not found'));
         return;
       }
       const ws = new WebSocket(
         'wss://api.openai.com/v1/realtime?model=gpt-realtime',
-        ['realtime', `openai-insecure-api-key.${apiKey}`, 'openai-beta.realtime-v1']
+        ['realtime', `openai-insecure-api-key.${key}`, 'openai-beta.realtime-v1']
       );
       ws.onopen = () => {
         updateStatus('connected', 'Connected');
+        let instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+        if (customInstruction) {
+          instructions += `\n\nAdditional context: ${customInstruction}`;
+        }
         ws.send(JSON.stringify({
           type: 'session.update',
           session: {
             modalities: ['text'],
-            instructions: `You are a real-time translator. Translate ${languageNames[inputLang]} to ${languageNames[outputLang]}. Output ONLY the translation, nothing else.`,
+            instructions,
             input_audio_format: 'pcm16',
-            input_audio_transcription: { model: 'whisper-1', language: inputLang },
+            input_audio_transcription: { model: 'whisper-1' },
             turn_detection: null
           }
         }));
@@ -358,7 +419,7 @@ export default function App() {
       ws.onclose = () => { if (isListening) updateStatus('error', 'Disconnected'); };
       wsRef.current = ws;
     });
-  }, [inputLang, outputLang, updateStatus, handleServerEvent, isListening]);
+  }, [langA, langB, apiKey, envApiKey, customInstruction, updateStatus, handleServerEvent, isListening]);
 
   const startAudioCapture = useCallback(async () => {
     try {
@@ -429,8 +490,18 @@ export default function App() {
   };
 
   const switchLanguages = () => {
-    setInputLang(outputLang);
-    setOutputLang(inputLang);
+    setLangA(langB);
+    setLangB(langA);
+  };
+
+  const handleApiKeyChange = (value) => {
+    setApiKey(value);
+    localStorage.setItem('translatorApiKey', value);
+  };
+
+  const handleInstructionChange = (value) => {
+    setCustomInstruction(value);
+    localStorage.setItem('translatorInstruction', value);
   };
 
   const increaseFontSize = () => {
@@ -493,34 +564,50 @@ export default function App() {
               <span className="text-xs text-codex-live">Live</span>
             </div>
           )}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full">
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full transition-colors ${
+            status === 'connected' || status === 'listening' ? 'bg-emerald-500/15' :
+            status === 'connecting' ? 'bg-amber-500/15' :
+            status === 'error' ? 'bg-red-500/15' : ''
+          }`}>
             <Circle
               size={6}
-              className={`${
-                status === 'connected' ? 'fill-codex-text text-codex-text' :
-                status === 'listening' ? 'fill-codex-live text-codex-live animate-pulse-soft' :
-                status === 'error' ? 'fill-codex-error text-codex-error' :
+              className={`transition-colors ${
+                status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
+                status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
+                status === 'error' ? 'fill-red-400 text-red-400' :
                 'fill-codex-muted text-codex-muted'
               }`}
             />
-            <span className="text-xs text-codex-text-secondary">{statusText}</span>
+            <span className={`text-xs transition-colors ${
+              status === 'connected' || status === 'listening' ? 'text-emerald-400' :
+              status === 'connecting' ? 'text-amber-400' :
+              status === 'error' ? 'text-red-400' :
+              'text-codex-text-secondary'
+            }`}>{statusText}</span>
           </div>
           <div className="relative" ref={micButtonRef}>
             <button
-              onClick={() => setShowMicSettings(!showMicSettings)}
+              onClick={() => setShowSettings(!showSettings)}
               disabled={isListening}
               className={`p-1.5 rounded-md transition-colors ${
                 isListening ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/5'
-              } ${showMicSettings ? 'bg-white/10' : ''}`}
+              } ${showSettings ? 'bg-white/10' : ''}`}
             >
-              <Mic size={16} className="text-codex-text-secondary" />
+              <Settings size={16} className="text-codex-text-secondary" />
             </button>
-            <MicrophonePopover
-              isOpen={showMicSettings}
-              onClose={() => setShowMicSettings(false)}
+            <SettingsPopover
+              isOpen={showSettings}
+              onClose={() => setShowSettings(false)}
               microphones={microphones}
               selectedMic={selectedMic}
               onSelectMic={setSelectedMic}
+              apiKey={apiKey}
+              onApiKeyChange={handleApiKeyChange}
+              hasEnvKey={!!envApiKey}
+              showApiKey={showApiKey}
+              setShowApiKey={setShowApiKey}
+              customInstruction={customInstruction}
+              onCustomInstructionChange={handleInstructionChange}
             />
           </div>
         </div>
@@ -528,7 +615,7 @@ export default function App() {
 
       {/* Language Bar */}
       <div className="flex items-center justify-center gap-3 px-4 py-3 border-b border-codex-border-subtle">
-        <LanguageSelector value={inputLang} onChange={setInputLang} disabled={isListening} />
+        <LanguageSelector value={langA} onChange={setLangA} disabled={isListening} />
         <button
           onClick={switchLanguages}
           disabled={isListening}
@@ -538,7 +625,7 @@ export default function App() {
         >
           <ArrowLeftRight size={16} className="text-codex-muted" />
         </button>
-        <LanguageSelector value={outputLang} onChange={setOutputLang} disabled={isListening} />
+        <LanguageSelector value={langB} onChange={setLangB} disabled={isListening} />
       </div>
 
       {/* Main Content */}
