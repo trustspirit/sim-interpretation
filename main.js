@@ -67,6 +67,7 @@ async function createWindow() {
     transparent: true,
     backgroundColor: '#00000000',
     hasShadow: true,
+    icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'icon.icns' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -113,42 +114,66 @@ ipcMain.on('close-settings', () => {
   settingsWindow?.close();
 });
 
+// Helper function to calculate subtitle position
+function getSubtitlePosition(position, subtitleHeight) {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const bounds = primaryDisplay.bounds;
+  const workArea = primaryDisplay.workArea;
+  
+  // Check if we're likely in fullscreen mode (no dock/menubar difference or minimal)
+  const isFullscreen = (bounds.height - workArea.height) < 30;
+  
+  if (isFullscreen) {
+    // Fullscreen: use full screen bounds
+    const y = position === 'top' ? 0 : bounds.height - subtitleHeight;
+    return { x: bounds.x, y, width: bounds.width };
+  } else {
+    // Normal desktop: respect dock and menubar
+    const y = position === 'top' ? workArea.y : workArea.y + workArea.height - subtitleHeight;
+    return { x: workArea.x, y, width: workArea.width };
+  }
+}
+
 // Subtitle mode handlers
 ipcMain.handle('toggle-subtitle-mode', (event, position) => {
   if (!mainWindow) return { success: false };
   
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
   const subtitleHeight = 120;
   
   if (!isSubtitleMode) {
     // Enter subtitle mode
     normalBounds = mainWindow.getBounds();
     
-    const y = position === 'top' ? 0 : screenHeight - subtitleHeight;
+    const pos = getSubtitlePosition(position, subtitleHeight);
+    
+    // Set size constraints first
+    mainWindow.setMinimumSize(400, 60);
+    mainWindow.setMaximumSize(pos.width, subtitleHeight);
     
     // Make visible on all workspaces including fullscreen apps
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     mainWindow.setAlwaysOnTop(true, 'screen-saver');
-    mainWindow.setBounds({
-      x: 0,
-      y: y,
-      width: screenWidth,
-      height: subtitleHeight
-    });
-    mainWindow.setMinimumSize(400, 80);
+    mainWindow.setHasShadow(false); // Disable shadow for transparency
+    
+    // Set size and position
+    mainWindow.setSize(pos.width, subtitleHeight);
+    mainWindow.setPosition(pos.x, pos.y);
+    
     mainWindow.setResizable(true);
     isSubtitleMode = true;
     
     return { success: true, isSubtitleMode: true };
   } else {
-    // Exit subtitle mode
+    // Exit subtitle mode - remove size constraints first
+    mainWindow.setMaximumSize(0, 0); // 0 means no limit
+    mainWindow.setMinimumSize(600, 500);
+    
     mainWindow.setVisibleOnAllWorkspaces(false);
     mainWindow.setAlwaysOnTop(false);
+    mainWindow.setHasShadow(true); // Re-enable shadow
     if (normalBounds) {
       mainWindow.setBounds(normalBounds);
     }
-    mainWindow.setMinimumSize(600, 500);
     isSubtitleMode = false;
     
     return { success: true, isSubtitleMode: false };
@@ -158,16 +183,10 @@ ipcMain.handle('toggle-subtitle-mode', (event, position) => {
 ipcMain.handle('update-subtitle-position', (event, position) => {
   if (!mainWindow || !isSubtitleMode) return { success: false };
   
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { height: screenHeight } = primaryDisplay.workAreaSize;
   const currentBounds = mainWindow.getBounds();
+  const pos = getSubtitlePosition(position, currentBounds.height);
   
-  const y = position === 'top' ? 0 : screenHeight - currentBounds.height;
-  
-  mainWindow.setBounds({
-    ...currentBounds,
-    y: y
-  });
+  mainWindow.setPosition(pos.x, pos.y);
   
   return { success: true };
 });
@@ -176,7 +195,15 @@ ipcMain.handle('get-subtitle-mode', () => {
   return isSubtitleMode;
 });
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  // Set dock icon on macOS
+  if (process.platform === 'darwin') {
+    const iconPath = path.join(__dirname, 'assets', 'icon.png');
+    app.dock.setIcon(iconPath);
+  }
+  
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

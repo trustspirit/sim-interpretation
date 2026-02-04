@@ -488,87 +488,123 @@ export default function App() {
   }, [isListening, visualize]);
 
   // Subtitle Mode UI
+  const subtitleHoverTimeoutRef = useRef(null);
+  
+  const handleSubtitleMouseMove = () => {
+    setSubtitleHovered(true);
+    if (subtitleHoverTimeoutRef.current) {
+      clearTimeout(subtitleHoverTimeoutRef.current);
+    }
+    subtitleHoverTimeoutRef.current = setTimeout(() => {
+      setSubtitleHovered(false);
+    }, 2000); // Hide after 2 seconds of no movement
+  };
+  
+  const handleSubtitleMouseLeave = () => {
+    if (subtitleHoverTimeoutRef.current) {
+      clearTimeout(subtitleHoverTimeoutRef.current);
+    }
+    setSubtitleHovered(false);
+  };
+  
   if (isSubtitleMode) {
     const latestTranslation = currentTranslation || translatedText[translatedText.length - 1] || '';
     
     return (
       <div 
-        className="fixed inset-0 bg-black/40 text-white flex items-center justify-center overflow-hidden"
-        onMouseEnter={() => setSubtitleHovered(true)}
-        onMouseLeave={() => setSubtitleHovered(false)}
+        className="h-full w-full bg-black/30 text-white relative drag-region"
+        onMouseMove={handleSubtitleMouseMove}
+        onMouseLeave={handleSubtitleMouseLeave}
       >
-        {/* Drag region - covers the whole window */}
-        <div className="absolute inset-0 drag-region" />
         
-        {/* Translation text - centered with text shadow for readability */}
-        <p 
-          className="text-xl font-semibold text-center leading-relaxed text-white px-8 pointer-events-none"
-          style={{ textShadow: '0 2px 4px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.5)' }}
-        >
-          {latestTranslation || (isListening ? 'Listening...' : 'Ready')}
-          {currentTranslation && (
-            <span className="inline-block w-[3px] h-5 bg-codex-live ml-1 animate-blink" />
-          )}
-        </p>
+        {/* Translation text - centered, fades when hovered */}
+        <div className={`absolute inset-0 flex items-center justify-center px-12 pointer-events-none transition-opacity duration-200 ${
+          subtitleHovered ? 'opacity-30' : 'opacity-100'
+        }`}>
+          <p 
+            className={`font-bold text-center leading-snug text-white line-clamp-2 ${
+              latestTranslation.length > 100 ? 'text-lg' :
+              latestTranslation.length > 60 ? 'text-xl' :
+              latestTranslation.length > 30 ? 'text-2xl' : 'text-3xl'
+            }`}
+            style={{ textShadow: '0 2px 8px rgba(0,0,0,1), 0 0 30px rgba(0,0,0,0.8), 0 0 60px rgba(0,0,0,0.5)' }}
+          >
+            {latestTranslation || (isListening ? 'Listening...' : 'Ready')}
+            {currentTranslation && (
+              <span className={`inline-block w-[3px] bg-codex-live ml-1 animate-blink ${
+                latestTranslation.length > 60 ? 'h-5' : 'h-7'
+              }`} />
+            )}
+          </p>
+        </div>
         
-        {/* Controls bar - center bottom, only visible on hover */}
-        <div className={`fixed bottom-1 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1 bg-black/60 backdrop-blur-sm rounded-full no-drag z-10 transition-opacity duration-200 ${
+        {/* Controls - center, only visible on hover */}
+        <div className={`absolute inset-0 flex items-center justify-center no-drag z-10 transition-opacity duration-200 ${
           subtitleHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}>
-          <button
-            onClick={toggleSubtitleMode}
-            className="p-1 hover:bg-white/20 rounded-full transition-colors"
-            title="Exit subtitle mode"
-          >
-            <Maximize2 size={12} className="text-white/80" />
-          </button>
-          <button
-            onClick={toggleSubtitlePosition}
-            className="p-1 hover:bg-white/20 rounded-full transition-colors"
-            title={subtitlePosition === 'bottom' ? 'Move to top' : 'Move to bottom'}
-          >
-            {subtitlePosition === 'bottom' ? <ArrowUp size={12} className="text-white/80" /> : <ArrowDown size={12} className="text-white/80" />}
-          </button>
-          <div className="w-px h-3 bg-white/20" />
-          {!isListening ? (
+          <div className="flex items-center gap-3 px-5 py-2.5 bg-black/70 backdrop-blur-sm rounded-full">
+            {/* Language indicator */}
+            <div className="flex items-center gap-1.5 text-white/80 text-sm">
+              <span>{languageNames[langA]}</span>
+              <ArrowLeftRight size={14} className="text-white/50" />
+              <span>{languageNames[langB]}</span>
+            </div>
+            <div className="w-px h-6 bg-white/30" />
             <button
-              onClick={startListening}
-              className="p-1 hover:bg-white/20 rounded-full transition-colors"
-              title="Start"
+              onClick={toggleSubtitleMode}
+              className="p-2 hover:bg-white/20 rounded-full transition-colors"
+              title="Exit subtitle mode"
             >
-              <Play size={12} className="text-white" fill="currentColor" />
+              <Maximize2 size={18} className="text-white/90" />
             </button>
-          ) : (
             <button
-              onClick={stopListening}
-              className="p-1 hover:bg-white/20 rounded-full transition-colors"
-              title="Stop"
+              onClick={toggleSubtitlePosition}
+              className="p-2 hover:bg-white/20 rounded-full transition-colors"
+              title={subtitlePosition === 'bottom' ? 'Move to top' : 'Move to bottom'}
             >
-              <Square size={10} className="text-codex-error" fill="currentColor" />
+              {subtitlePosition === 'bottom' ? <ArrowUp size={18} className="text-white/90" /> : <ArrowDown size={18} className="text-white/90" />}
             </button>
-          )}
-          {isListening && (
-            <>
-              <div className="w-px h-3 bg-white/20" />
-              <AudioWave isActive={audioLevel > 0.05} audioLevel={audioLevel} />
-            </>
-          )}
-          <Circle
-            size={5}
-            className={`ml-1 transition-colors ${
-              status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
-              status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
-              status === 'error' ? 'fill-red-400 text-red-400' :
-              'fill-codex-muted text-codex-muted'
-            }`}
-          />
+            <div className="w-px h-6 bg-white/30" />
+            {!isListening ? (
+              <button
+                onClick={startListening}
+                className="p-2 hover:bg-white/20 rounded-full transition-colors"
+                title="Start"
+              >
+                <Play size={20} className="text-white" fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                onClick={stopListening}
+                className="p-2 hover:bg-white/20 rounded-full transition-colors"
+                title="Stop"
+              >
+                <Square size={16} className="text-codex-error" fill="currentColor" />
+              </button>
+            )}
+            {isListening && (
+              <>
+                <div className="w-px h-6 bg-white/30" />
+                <AudioWave isActive={audioLevel > 0.05} audioLevel={audioLevel} />
+              </>
+            )}
+            <Circle
+              size={8}
+              className={`ml-1 transition-colors ${
+                status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
+                status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
+                status === 'error' ? 'fill-red-400 text-red-400' :
+                'fill-codex-muted text-codex-muted'
+              }`}
+            />
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-[#0a0a0a] text-codex-text flex flex-col overflow-hidden">
+    <div className="h-full bg-[#0a0a0a] text-codex-text flex flex-col overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-codex-border bg-codex-bg drag-region">
         <div className="flex items-center no-drag">
