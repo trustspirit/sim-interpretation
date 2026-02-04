@@ -200,7 +200,7 @@ export default function App() {
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
   const [currentTranslation, setCurrentTranslation] = useState('');
-  const [fontSize, setFontSize] = useState(2); // 0: small, 1: medium, 2: large, 3: x-large
+  const [fontSize, setFontSize] = useState(2); // 0: small, 1: medium, 2: large, 3: x-large, 4: xx-large, 5: xxx-large
   const [textDirection, setTextDirection] = useState('down'); // 'down': top to bottom, 'up': bottom to top
   const [isSubtitleMode, setIsSubtitleMode] = useState(false);
   const [subtitlePosition, setSubtitlePosition] = useState(() => localStorage.getItem('translatorSubtitlePosition') || 'bottom');
@@ -401,11 +401,11 @@ export default function App() {
         updateStatus('connected', 'Connected');
         let instructions;
         if (direction === 'a-to-b') {
-          instructions = `You are a real-time translator. Translate ${languageNames[langA]} to ${languageNames[langB]}. Output ONLY the translation, nothing else.`;
+          instructions = `You are a real-time translator. Translate ${languageNames[langA]} to ${languageNames[langB]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
         } else if (direction === 'b-to-a') {
-          instructions = `You are a real-time translator. Translate ${languageNames[langB]} to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+          instructions = `You are a real-time translator. Translate ${languageNames[langB]} to ${languageNames[langA]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
         } else {
-          instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+          instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
         }
         if (customInstruction) {
           instructions += `\n\nAdditional context: ${customInstruction}`;
@@ -508,7 +508,7 @@ export default function App() {
   };
 
   const increaseFontSize = () => {
-    if (fontSize < 3) setFontSize(fontSize + 1);
+    if (fontSize < 5) setFontSize(fontSize + 1);
   };
 
   const decreaseFontSize = () => {
@@ -517,9 +517,9 @@ export default function App() {
 
   const getFontSizeClasses = () => {
     const sizes = {
-      current: ['text-2xl', 'text-3xl', 'text-4xl', 'text-5xl'],
-      previous: ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl'],
-      cursor: ['h-6', 'h-8', 'h-10', 'h-12']
+      current: ['text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl', 'text-7xl'],
+      previous: ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl'],
+      cursor: ['h-6', 'h-8', 'h-10', 'h-12', 'h-14', 'h-16']
     };
     return {
       current: sizes.current[fontSize],
@@ -1018,9 +1018,9 @@ export default function App() {
             <div className="w-px h-4 bg-codex-border" />
             <button
               onClick={increaseFontSize}
-              disabled={fontSize === 3}
+              disabled={fontSize === 5}
               className={`p-2.5 text-codex-muted hover:text-codex-text transition-colors rounded-r-lg ${
-                fontSize === 3 ? 'opacity-40 cursor-not-allowed' : ''
+                fontSize === 5 ? 'opacity-40 cursor-not-allowed' : ''
               }`}
               title="Increase font size"
             >
