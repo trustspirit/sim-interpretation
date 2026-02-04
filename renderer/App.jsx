@@ -11,7 +11,9 @@ import {
   Type,
   ArrowDown,
   ArrowUp,
-  Settings
+  Settings,
+  PanelTop,
+  Maximize2
 } from 'lucide-react';
 
 // Language configuration
@@ -143,6 +145,9 @@ export default function App() {
   const [currentTranslation, setCurrentTranslation] = useState('');
   const [fontSize, setFontSize] = useState(2); // 0: small, 1: medium, 2: large, 3: x-large
   const [textDirection, setTextDirection] = useState('down'); // 'down': top to bottom, 'up': bottom to top
+  const [isSubtitleMode, setIsSubtitleMode] = useState(false);
+  const [subtitlePosition, setSubtitlePosition] = useState(() => localStorage.getItem('translatorSubtitlePosition') || 'bottom');
+  const [subtitleHovered, setSubtitleHovered] = useState(false);
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -185,8 +190,14 @@ export default function App() {
       setApiKey(localStorage.getItem('translatorApiKey') || '');
       setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
       setSelectedMic(localStorage.getItem('translatorMic') || '');
+      setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
     };
     window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
+    
+    // Check if we're already in subtitle mode
+    window.electronAPI?.getSubtitleMode?.().then(mode => {
+      setIsSubtitleMode(mode || false);
+    });
   }, []);
 
   const updateStatus = useCallback((state, text) => {
@@ -441,6 +452,21 @@ export default function App() {
     setTextDirection(prev => prev === 'down' ? 'up' : 'down');
   };
 
+  const toggleSubtitleMode = async () => {
+    const position = localStorage.getItem('translatorSubtitlePosition') || 'bottom';
+    const result = await window.electronAPI?.toggleSubtitleMode?.(position);
+    if (result?.success) {
+      setIsSubtitleMode(result.isSubtitleMode);
+    }
+  };
+
+  const toggleSubtitlePosition = async () => {
+    const newPosition = subtitlePosition === 'bottom' ? 'top' : 'bottom';
+    setSubtitlePosition(newPosition);
+    localStorage.setItem('translatorSubtitlePosition', newPosition);
+    await window.electronAPI?.updateSubtitlePosition?.(newPosition);
+  };
+
   // Keep current text centered by scrolling
   useEffect(() => {
     if (scrollRef.current) {
@@ -461,8 +487,88 @@ export default function App() {
     return () => { if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current); };
   }, [isListening, visualize]);
 
+  // Subtitle Mode UI
+  if (isSubtitleMode) {
+    const latestTranslation = currentTranslation || translatedText[translatedText.length - 1] || '';
+    
+    return (
+      <div 
+        className="fixed inset-0 bg-black/40 text-white flex items-center justify-center overflow-hidden"
+        onMouseEnter={() => setSubtitleHovered(true)}
+        onMouseLeave={() => setSubtitleHovered(false)}
+      >
+        {/* Drag region - covers the whole window */}
+        <div className="absolute inset-0 drag-region" />
+        
+        {/* Translation text - centered with text shadow for readability */}
+        <p 
+          className="text-xl font-semibold text-center leading-relaxed text-white px-8 pointer-events-none"
+          style={{ textShadow: '0 2px 4px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.5)' }}
+        >
+          {latestTranslation || (isListening ? 'Listening...' : 'Ready')}
+          {currentTranslation && (
+            <span className="inline-block w-[3px] h-5 bg-codex-live ml-1 animate-blink" />
+          )}
+        </p>
+        
+        {/* Controls bar - center bottom, only visible on hover */}
+        <div className={`fixed bottom-1 left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1 bg-black/60 backdrop-blur-sm rounded-full no-drag z-10 transition-opacity duration-200 ${
+          subtitleHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        }`}>
+          <button
+            onClick={toggleSubtitleMode}
+            className="p-1 hover:bg-white/20 rounded-full transition-colors"
+            title="Exit subtitle mode"
+          >
+            <Maximize2 size={12} className="text-white/80" />
+          </button>
+          <button
+            onClick={toggleSubtitlePosition}
+            className="p-1 hover:bg-white/20 rounded-full transition-colors"
+            title={subtitlePosition === 'bottom' ? 'Move to top' : 'Move to bottom'}
+          >
+            {subtitlePosition === 'bottom' ? <ArrowUp size={12} className="text-white/80" /> : <ArrowDown size={12} className="text-white/80" />}
+          </button>
+          <div className="w-px h-3 bg-white/20" />
+          {!isListening ? (
+            <button
+              onClick={startListening}
+              className="p-1 hover:bg-white/20 rounded-full transition-colors"
+              title="Start"
+            >
+              <Play size={12} className="text-white" fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              onClick={stopListening}
+              className="p-1 hover:bg-white/20 rounded-full transition-colors"
+              title="Stop"
+            >
+              <Square size={10} className="text-codex-error" fill="currentColor" />
+            </button>
+          )}
+          {isListening && (
+            <>
+              <div className="w-px h-3 bg-white/20" />
+              <AudioWave isActive={audioLevel > 0.05} audioLevel={audioLevel} />
+            </>
+          )}
+          <Circle
+            size={5}
+            className={`ml-1 transition-colors ${
+              status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
+              status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
+              status === 'error' ? 'fill-red-400 text-red-400' :
+              'fill-codex-muted text-codex-muted'
+            }`}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-screen bg-codex-bg text-codex-text flex flex-col overflow-hidden">
+    <div className="h-screen bg-[#0a0a0a] text-codex-text flex flex-col overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-codex-border bg-codex-bg drag-region">
         <div className="flex items-center no-drag">
@@ -665,6 +771,13 @@ export default function App() {
             title={textDirection === 'down' ? 'Top to bottom' : 'Bottom to top'}
           >
             {textDirection === 'down' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+          </button>
+          <button
+            onClick={toggleSubtitleMode}
+            className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
+            title="Subtitle mode"
+          >
+            <PanelTop size={16} />
           </button>
           <button
             onClick={clearTranscripts}

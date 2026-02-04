@@ -7,5 +7,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.send('window-maximize'),
   openSettings: () => ipcRenderer.send('open-settings'),
   closeSettings: () => ipcRenderer.send('close-settings'),
-  onSettingsClosed: (callback) => ipcRenderer.on('settings-closed', callback)
+  onSettingsClosed: (callback) => ipcRenderer.on('settings-closed', callback),
+  // Subtitle mode APIs
+  toggleSubtitleMode: (position) => ipcRenderer.invoke('toggle-subtitle-mode', position),
+  updateSubtitlePosition: (position) => ipcRenderer.invoke('update-subtitle-position', position),
+  getSubtitleMode: () => ipcRenderer.invoke('get-subtitle-mode')
 });

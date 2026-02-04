@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mic, Key, Eye, EyeOff, X, ChevronDown, ChevronRight, Save, Check } from 'lucide-react';
+import { Mic, Key, Eye, EyeOff, X, ChevronDown, ChevronRight, Save, Check, Monitor } from 'lucide-react';
 
 export default function Settings() {
   const [apiKey, setApiKey] = useState('');
@@ -13,6 +13,7 @@ export default function Settings() {
   const [selectedMic, setSelectedMic] = useState('');
   const [micDropdownOpen, setMicDropdownOpen] = useState(false);
   const [envApiKey, setEnvApiKey] = useState('');
+  const [subtitlePosition, setSubtitlePosition] = useState('bottom');
 
   useEffect(() => {
     setApiKey(localStorage.getItem('translatorApiKey') || '');
@@ -22,6 +23,7 @@ export default function Settings() {
     setActivePreset(parseInt(localStorage.getItem('translatorActivePreset') || '0'));
     setSelectedMic(localStorage.getItem('translatorMic') || '');
     setEnvApiKey(window.electronAPI?.getApiKey?.() || '');
+    setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
     
     async function loadMicrophones() {
       try {
@@ -53,6 +55,11 @@ export default function Settings() {
     setSelectedMic(deviceId);
     localStorage.setItem('translatorMic', deviceId);
     setMicDropdownOpen(false);
+  };
+
+  const handleSubtitlePositionChange = (position) => {
+    setSubtitlePosition(position);
+    localStorage.setItem('translatorSubtitlePosition', position);
   };
 
   const saveToPreset = (presetNum) => {
@@ -131,6 +138,36 @@ export default function Settings() {
                 </div>
               </>
             )}
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-center gap-2 mb-3">
+            <Monitor size={16} className="text-codex-muted" />
+            <h2 className="text-sm font-medium">Subtitle Mode Position</h2>
+          </div>
+          <p className="text-xs text-codex-muted mb-3">Where the subtitle bar appears when in subtitle mode</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleSubtitlePositionChange('top')}
+              className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                subtitlePosition === 'top'
+                  ? 'bg-white/10 text-codex-text border border-codex-border'
+                  : 'bg-codex-surface text-codex-text-secondary hover:bg-white/5 border border-transparent'
+              }`}
+            >
+              Top
+            </button>
+            <button
+              onClick={() => handleSubtitlePositionChange('bottom')}
+              className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                subtitlePosition === 'bottom'
+                  ? 'bg-white/10 text-codex-text border border-codex-border'
+                  : 'bg-codex-surface text-codex-text-secondary hover:bg-white/5 border border-transparent'
+              }`}
+            >
+              Bottom
+            </button>
           </div>
         </section>
 
