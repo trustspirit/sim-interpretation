@@ -9,6 +9,41 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let mainWindow;
+let settingsWindow;
+
+function createSettingsWindow() {
+  if (settingsWindow) {
+    settingsWindow.focus();
+    return;
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 400,
+    height: 500,
+    minWidth: 350,
+    minHeight: 400,
+    frame: false,
+    transparent: false,
+    backgroundColor: '#0a0a0a',
+    parent: mainWindow,
+    modal: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+
+  settingsWindow.loadFile('dist/settings.html');
+  
+  settingsWindow.on('closed', () => {
+    settingsWindow = null;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('settings-closed');
+    }
+  });
+}
 
 async function createWindow() {
   // macOS microphone permission request
@@ -65,6 +100,14 @@ ipcMain.on('window-maximize', () => {
   } else {
     mainWindow?.maximize();
   }
+});
+
+ipcMain.on('open-settings', () => {
+  createSettingsWindow();
+});
+
+ipcMain.on('close-settings', () => {
+  settingsWindow?.close();
 });
 
 app.whenReady().then(createWindow);
