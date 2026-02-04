@@ -120,7 +120,7 @@ function VoiceSelector({ value, onChange, disabled }) {
       {isOpen && !disabled && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-32">
+          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-40">
             {voiceOptions.map((voice) => (
               <button
                 key={voice.code}
@@ -133,64 +133,9 @@ function VoiceSelector({ value, onChange, disabled }) {
                   value === voice.code ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
                 }`}
               >
-                <div className="flex justify-between items-center">
+                <div className="flex justify-between items-center gap-3">
                   <span>{voice.name}</span>
-                  <span className="text-[10px] text-codex-muted">{voice.desc}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// Speed selector for TTS
-const speedOptions = [
-  { value: 0.5, label: '0.5x', desc: 'Slow' },
-  { value: 0.75, label: '0.75x', desc: '' },
-  { value: 1.0, label: '1x', desc: 'Normal' },
-  { value: 1.25, label: '1.25x', desc: '' },
-  { value: 1.5, label: '1.5x', desc: 'Fast' },
-  { value: 2.0, label: '2x', desc: 'Very fast' },
-];
-
-function SpeedSelector({ value, onChange, disabled }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const selected = speedOptions.find(s => s.value === value) || speedOptions[2];
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        disabled={disabled}
-        className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-all ${
-          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
-        } bg-codex-surface border border-codex-border`}
-      >
-        <span className="text-codex-text">{selected.label}</span>
-        <ChevronDown size={10} className={`text-codex-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-      </button>
-      {isOpen && !disabled && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-20">
-            {speedOptions.map((speed) => (
-              <button
-                key={speed.value}
-                onClick={() => {
-                  onChange(speed.value);
-                  localStorage.setItem('translatorVoiceSpeed', speed.value.toString());
-                  setIsOpen(false);
-                }}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                  value === speed.value ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
-                }`}
-              >
-                <div className="flex justify-between items-center gap-2">
-                  <span>{speed.label}</span>
-                  {speed.desc && <span className="text-[10px] text-codex-muted">{speed.desc}</span>}
+                  <span className="text-[10px] text-codex-muted whitespace-nowrap">{voice.desc}</span>
                 </div>
               </button>
             ))}
@@ -325,7 +270,6 @@ export default function App() {
   const [currentSubtitle, setCurrentSubtitle] = useState('');
   const [isVoiceMode, setIsVoiceMode] = useState(false);
   const [voiceType, setVoiceType] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
-  const [voiceSpeed, setVoiceSpeed] = useState(() => parseFloat(localStorage.getItem('translatorVoiceSpeed')) || 1.0);
   const [isSpeakingTTS, setIsSpeakingTTS] = useState(false);
   const [voiceOnlyMode, setVoiceOnlyMode] = useState(() => localStorage.getItem('translatorVoiceOnly') === 'true');
 
@@ -347,13 +291,15 @@ export default function App() {
   const subtitleTimerRef = useRef(null);
   const subtitleQueueRef = useRef([]);
   const lastProcessedIndexRef = useRef(-1);
-  const ttsQueueRef = useRef([]);
-  const ttsAudioRef = useRef(null);
-  const isPlayingTTSRef = useRef(false);
-  const lastTTSIndexRef = useRef(-1);
   const isProcessingQueueRef = useRef(false);
   const subtitleContainerRef = useRef(null);
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
+
+  // Realtime audio output refs
+  const outputAudioContextRef = useRef(null);
+  const isPlayingRealtimeAudioRef = useRef(false);
+  const nextPlayTimeRef = useRef(0);
+  const isVoiceModeRef = useRef(false);
 
   const SILENCE_THRESHOLD = 0.05;
   const SILENCE_DURATION_MS = 600;
@@ -403,6 +349,72 @@ export default function App() {
     return btoa(binary);
   };
 
+  // Base64 to ArrayBuffer
+  const base64ToArrayBuffer = (base64) => {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  };
+
+  // Convert PCM16 to Float32 for Web Audio API
+  const pcm16ToFloat32 = (pcm16Buffer) => {
+    const int16Array = new Int16Array(pcm16Buffer);
+    const float32Array = new Float32Array(int16Array.length);
+    for (let i = 0; i < int16Array.length; i++) {
+      float32Array[i] = int16Array[i] / 32768;
+    }
+    return float32Array;
+  };
+
+  // Play audio chunk from Realtime API
+  const playRealtimeAudioChunk = useCallback((base64Audio) => {
+    if (!isVoiceModeRef.current) return;
+
+    // Initialize output audio context if needed
+    if (!outputAudioContextRef.current) {
+      outputAudioContextRef.current = new AudioContext({ sampleRate: 24000 });
+    }
+
+    const ctx = outputAudioContextRef.current;
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    const pcmBuffer = base64ToArrayBuffer(base64Audio);
+    const float32Data = pcm16ToFloat32(pcmBuffer);
+
+    // Create audio buffer
+    const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
+    audioBuffer.getChannelData(0).set(float32Data);
+
+    // Schedule playback
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+
+    const currentTime = ctx.currentTime;
+    const startTime = Math.max(currentTime, nextPlayTimeRef.current);
+    source.start(startTime);
+    nextPlayTimeRef.current = startTime + audioBuffer.duration;
+
+    if (!isPlayingRealtimeAudioRef.current) {
+      isPlayingRealtimeAudioRef.current = true;
+      setIsSpeakingTTS(true);
+    }
+  }, []);
+
+  // Stop realtime audio playback
+  const stopRealtimeAudio = useCallback(() => {
+    if (outputAudioContextRef.current) {
+      outputAudioContextRef.current.close();
+      outputAudioContextRef.current = null;
+    }
+    isPlayingRealtimeAudioRef.current = false;
+    nextPlayTimeRef.current = 0;
+    setIsSpeakingTTS(false);
+  }, []);
+
   const commitAudio = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
@@ -447,23 +459,34 @@ export default function App() {
         }
         break;
       case 'response.text.delta':
+      case 'response.audio_transcript.delta':
         if (event.delta) {
           currentTranslationRef.current += event.delta;
           setCurrentTranslation(prev => prev + event.delta);
         }
         break;
       case 'response.text.done':
+      case 'response.audio_transcript.done':
         if (currentTranslationRef.current) {
           const finalText = currentTranslationRef.current;
-          console.log('Adding to translated:', finalText);
-          setTranslatedText(prev => {
-            console.log('Previous translations:', prev);
-            return [...prev, finalText];
-          });
+          setTranslatedText(prev => [...prev, finalText]);
           currentTranslationRef.current = '';
           setCurrentTranslation('');
         }
         updateStatus('connected', 'Connected');
+        break;
+      case 'response.audio.delta':
+        // Play audio chunk from Realtime API (streaming)
+        if (event.delta && isVoiceModeRef.current) {
+          playRealtimeAudioChunk(event.delta);
+        }
+        break;
+      case 'response.audio.done':
+        // Audio streaming complete
+        setTimeout(() => {
+          isPlayingRealtimeAudioRef.current = false;
+          setIsSpeakingTTS(false);
+        }, 500);
         break;
       case 'response.done':
         updateStatus('connected', 'Connected');
@@ -472,7 +495,7 @@ export default function App() {
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, requestTranslation]);
+  }, [updateStatus, requestTranslation, playRealtimeAudioChunk]);
 
   const visualize = useCallback(() => {
     if (!analyserRef.current || !isListeningRef.current) return;
@@ -523,13 +546,23 @@ export default function App() {
       );
       ws.onopen = () => {
         updateStatus('connected', 'Connected');
+        const baseRules = `
+CRITICAL RULES:
+- You are ONLY a translator. You are NOT an assistant.
+- Output ONLY the direct translation of the input speech.
+- NEVER greet, introduce yourself, or say "Hello".
+- NEVER ask questions or offer help.
+- NEVER add comments, explanations, or any extra text.
+- If the input is unclear or empty, output NOTHING (stay silent).
+- Do NOT respond to the content - just translate it literally.`;
+
         let instructions;
         if (direction === 'a-to-b') {
-          instructions = `You are a real-time translator. Translate ${languageNames[langA]} to ${languageNames[langB]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
+          instructions = `Translate ${languageNames[langA]} speech to ${languageNames[langB]}. ${baseRules}`;
         } else if (direction === 'b-to-a') {
-          instructions = `You are a real-time translator. Translate ${languageNames[langB]} to ${languageNames[langA]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
+          instructions = `Translate ${languageNames[langB]} speech to ${languageNames[langA]}. ${baseRules}`;
         } else {
-          instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the direct translation. NEVER add comments, questions, explanations, or any additional text. Do not ask questions. Do not offer help. Just translate.`;
+          instructions = `Bidirectional translator: ${languageNames[langA]} ↔ ${languageNames[langB]}. Detect input language and translate to the other. ${baseRules}`;
         }
         if (customInstruction) {
           instructions += `\n\nAdditional context: ${customInstruction}`;
@@ -540,15 +573,34 @@ export default function App() {
         } else if (direction === 'b-to-a') {
           transcriptionConfig.language = langB;
         }
+
+        // Map TTS voices to Realtime API voices
+        const realtimeVoiceMap = {
+          'alloy': 'alloy',
+          'echo': 'echo',
+          'fable': 'sage',    // British-ish
+          'onyx': 'ash',      // Deep male
+          'nova': 'coral',    // Female
+          'shimmer': 'shimmer'
+        };
+
+        const sessionConfig = {
+          modalities: isVoiceModeRef.current ? ['text', 'audio'] : ['text'],
+          instructions,
+          input_audio_format: 'pcm16',
+          input_audio_transcription: transcriptionConfig,
+          turn_detection: null
+        };
+
+        // Add voice config if voice mode is enabled
+        if (isVoiceModeRef.current) {
+          sessionConfig.voice = realtimeVoiceMap[voiceType] || 'alloy';
+          sessionConfig.output_audio_format = 'pcm16';
+        }
+
         ws.send(JSON.stringify({
           type: 'session.update',
-          session: {
-            modalities: ['text'],
-            instructions,
-            input_audio_format: 'pcm16',
-            input_audio_transcription: transcriptionConfig,
-            turn_detection: null
-          }
+          session: sessionConfig
         }));
         resolve(true);
       };
@@ -557,7 +609,7 @@ export default function App() {
       ws.onclose = () => { if (isListening) updateStatus('error', 'Disconnected'); };
       wsRef.current = ws;
     });
-  }, [langA, langB, apiKey, envApiKey, customInstruction, direction, updateStatus, handleServerEvent, isListening]);
+  }, [langA, langB, apiKey, envApiKey, customInstruction, direction, voiceType, updateStatus, handleServerEvent, isListening]);
 
   const startAudioCapture = useCallback(async () => {
     try {
@@ -617,6 +669,8 @@ export default function App() {
     audioContextRef.current = null;
     mediaStreamRef.current = null;
     wsRef.current = null;
+    // Reset realtime audio timing (let current audio finish naturally)
+    nextPlayTimeRef.current = 0;
     updateStatus('ready', 'Ready');
   };
 
@@ -834,107 +888,13 @@ export default function App() {
     }
   }, [isSubtitleMode]);
 
-  // TTS (Text-to-Speech) functions
-  const playTTS = useCallback(async (text) => {
-    const key = apiKey || envApiKey;
-    if (!key || !text) return;
-
-    try {
-      setIsSpeakingTTS(true);
-      const response = await fetch('https://api.openai.com/v1/audio/speech', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'tts-1',
-          voice: voiceType,
-          speed: voiceSpeed,
-          input: text,
-        }),
-      });
-
-      if (!response.ok) throw new Error('TTS request failed');
-
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-
-      if (ttsAudioRef.current) {
-        ttsAudioRef.current.pause();
-        URL.revokeObjectURL(ttsAudioRef.current.src);
-      }
-
-      const audio = new Audio(audioUrl);
-      ttsAudioRef.current = audio;
-
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl);
-        setIsSpeakingTTS(false);
-        isPlayingTTSRef.current = false;
-        // Process next in queue
-        processNextTTS();
-      };
-
-      audio.onerror = () => {
-        setIsSpeakingTTS(false);
-        isPlayingTTSRef.current = false;
-        processNextTTS();
-      };
-
-      await audio.play();
-    } catch (error) {
-      console.error('TTS error:', error);
-      setIsSpeakingTTS(false);
-      isPlayingTTSRef.current = false;
-      processNextTTS();
-    }
-  }, [apiKey, envApiKey, voiceType, voiceSpeed]);
-
-  const processNextTTS = useCallback(() => {
-    if (ttsQueueRef.current.length === 0) {
-      isPlayingTTSRef.current = false;
-      return;
-    }
-    const nextText = ttsQueueRef.current.shift();
-    playTTS(nextText);
-  }, [playTTS]);
-
-  const startTTSProcessing = useCallback(() => {
-    if (isPlayingTTSRef.current) return;
-    if (ttsQueueRef.current.length === 0) return;
-    isPlayingTTSRef.current = true;
-    processNextTTS();
-  }, [processNextTTS]);
-
-  // Queue translations for TTS when voice mode is enabled
+  // Sync voice mode ref and stop audio when disabled
   useEffect(() => {
-    if (!isVoiceMode) return;
-    if (currentTranslation) return; // Wait for complete translation
-
-    const latestIndex = translatedText.length - 1;
-    if (latestIndex < 0 || latestIndex <= lastTTSIndexRef.current) return;
-
-    const newText = translatedText[latestIndex];
-    lastTTSIndexRef.current = latestIndex;
-
-    ttsQueueRef.current.push(newText);
-    startTTSProcessing();
-  }, [isVoiceMode, translatedText, currentTranslation, startTTSProcessing]);
-
-  // Stop TTS when voice mode is disabled
-  useEffect(() => {
+    isVoiceModeRef.current = isVoiceMode;
     if (!isVoiceMode) {
-      if (ttsAudioRef.current) {
-        ttsAudioRef.current.pause();
-        ttsAudioRef.current = null;
-      }
-      ttsQueueRef.current = [];
-      lastTTSIndexRef.current = -1;
-      isPlayingTTSRef.current = false;
-      setIsSpeakingTTS(false);
+      stopRealtimeAudio();
     }
-  }, [isVoiceMode]);
+  }, [isVoiceMode, stopRealtimeAudio]);
 
   // Subtitle Mode UI
   const subtitleHoverTimeoutRef = useRef(null);
@@ -1293,7 +1253,6 @@ export default function App() {
             {isVoiceMode && (
               <>
                 <VoiceSelector value={voiceType} onChange={setVoiceType} disabled={isSpeakingTTS} />
-                <SpeedSelector value={voiceSpeed} onChange={setVoiceSpeed} disabled={isSpeakingTTS} />
                 <button
                   onClick={() => {
                     const newValue = !voiceOnlyMode;
