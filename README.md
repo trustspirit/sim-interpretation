@@ -22,6 +22,21 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 - French
 - German
 
+### Voice Mode (Text-to-Speech)
+Listen to translations spoken aloud with OpenAI's TTS.
+
+- **Multiple voices**: Alloy, Echo, Fable, Onyx, Nova, Shimmer
+- **Speed control**: 0.5x to 2x playback speed
+- **Voice-only mode**: Hide text and only hear audio output
+- Queued playback for continuous translation
+
+### Translation Direction
+Control how languages are detected and translated.
+
+- **Auto**: Automatically detect input language and translate to the other
+- **A → B**: Force translation from language A to B
+- **B ← A**: Force translation from language B to A
+
 ### Subtitle Mode
 View translation results while watching videos or during video conferences with subtitle mode.
 
@@ -30,6 +45,7 @@ View translation results while watching videos or during video conferences with 
 - Works over fullscreen applications
 - Semi-transparent background to see content behind
 - Controls appear only on mouse hover
+- Smart queue system for smooth text display
 
 ### Settings
 - **Microphone Selection**: Choose your input device
@@ -37,6 +53,10 @@ View translation results while watching videos or during video conferences with 
 - **Translation Instructions**: Add context to improve translation quality
 - **Presets**: Save frequently used instructions (2 slots)
 - **API Key**: Configure OpenAI API key
+
+### Display Options
+- **Font size**: 6 levels from small to extra large
+- **Text direction**: Top-to-bottom or bottom-to-top flow
 
 ## Installation
 
@@ -78,6 +98,23 @@ npm run electron
 2. **Start Recording**: Click the Play button to begin speech recognition
 3. **View Translation**: Recognized speech is translated and displayed in real-time
 4. **Stop Recording**: Click the Stop button to end recording
+
+### Voice Mode
+
+1. Click the speaker icon to enable voice mode
+2. When enabled, translations are read aloud automatically
+3. Additional controls appear:
+   - **Voice selector**: Choose from 6 different voices
+   - **Speed selector**: Adjust playback speed (0.5x - 2x)
+   - **Eye icon**: Toggle voice-only mode (hides text)
+
+### Translation Direction
+
+1. Click the direction icon (↔) between languages
+2. Choose your preferred mode:
+   - **Auto (↔)**: Detect language automatically
+   - **A → B**: Always translate from first to second language
+   - **B ← A**: Always translate from second to first language
 
 ### Subtitle Mode
 
@@ -123,7 +160,7 @@ Settings > API Key section
 - **React**: UI framework
 - **Vite**: Build tool
 - **Tailwind CSS**: Styling
-- **OpenAI API**: Speech recognition (Whisper) + Translation (GPT)
+- **OpenAI API**: Speech recognition (Whisper) + Translation (GPT) + Text-to-Speech (TTS)
 
 ## Project Structure
 
