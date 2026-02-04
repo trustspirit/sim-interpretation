@@ -437,6 +437,7 @@ export default function App() {
         if (event.transcript?.trim()) {
           const text = event.transcript.trim();
           const hallucinations = [
+            // Korean hallucinations
             '구독과 좋아요 부탁드립니다',
             '좋아요와 구독 부탁드립니다',
             '오늘도 시청해주셔서 감사합니다',
@@ -444,13 +445,26 @@ export default function App() {
             '시청해주셔서 감사합니다',
             '시청해 주셔서 감사합니다',
             '감사합니다',
-            '....', '...', '♪', '[음악]', '[박수]', '[웃음]',
+            'MBC 뉴스',
+            'KBS 뉴스',
+            'SBS 뉴스',
+            '이덕영입니다',
+            '입니다',
+            // English hallucinations
             'Thank you for watching',
-            'Thanks for watching'
+            'Thanks for watching',
+            'Thank you',
+            'Adjust the compressor',
+            'Please subscribe',
+            'Like and subscribe',
+            // Symbols and markers
+            '....', '...', '..', '♪', '[음악]', '[박수]', '[웃음]',
+            '[Music]', '[Applause]', '[Laughter]', '[BLANK_AUDIO]',
+            '(upbeat music)', '(dramatic music)', '(sighs)',
           ];
           const isHallucination = hallucinations.some(h =>
-            text === h || text.includes(h) || text.startsWith('♪')
-          ) || text.length < 3;
+            text === h || text.includes(h) || text.startsWith('♪') || text.startsWith('[')
+          ) || text.length < 4;
           if (!isHallucination) {
             setOriginalText(prev => [...prev, text]);
             pendingTranscriptionsRef.current.push(text);
