@@ -138,7 +138,7 @@ function getSubtitlePosition(position, subtitleHeight) {
 ipcMain.handle('toggle-subtitle-mode', (event, position) => {
   if (!mainWindow) return { success: false };
   
-  const subtitleHeight = 120;
+  const subtitleHeight = 160;
   
   if (!isSubtitleMode) {
     // Enter subtitle mode
@@ -165,17 +165,19 @@ ipcMain.handle('toggle-subtitle-mode', (event, position) => {
     return { success: true, isSubtitleMode: true };
   } else {
     // Exit subtitle mode - remove size constraints first
-    mainWindow.setMaximumSize(0, 0); // 0 means no limit
     mainWindow.setMinimumSize(600, 500);
-    
+    mainWindow.setMaximumSize(10000, 10000); // Large number to effectively remove limit
+
     mainWindow.setVisibleOnAllWorkspaces(false);
     mainWindow.setAlwaysOnTop(false);
     mainWindow.setHasShadow(true); // Re-enable shadow
+    mainWindow.setResizable(true);
+
     if (normalBounds) {
       mainWindow.setBounds(normalBounds);
     }
     isSubtitleMode = false;
-    
+
     return { success: true, isSubtitleMode: false };
   }
 });

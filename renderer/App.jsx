@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Mic,
   Play,
   Square,
   Trash2,
@@ -87,7 +86,65 @@ function AudioWave({ isActive, audioLevel }) {
   );
 }
 
-// Settings popover
+// Direction selector (auto ↔, A→B, B←A)
+function DirectionSelector({ value, onChange, disabled, langA, langB }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  const options = [
+    { code: 'auto', label: 'Auto', icon: '↔', desc: 'Auto-detect language' },
+    { code: 'a-to-b', label: `${languageNames[langA]} → ${languageNames[langB]}`, icon: '→', desc: `Speak ${languageNames[langA]}` },
+    { code: 'b-to-a', label: `${languageNames[langB]} → ${languageNames[langA]}`, icon: '←', desc: `Speak ${languageNames[langB]}` },
+  ];
+  const selected = options.find(o => o.code === value) || options[0];
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        disabled={disabled}
+        title={selected.desc}
+        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
+          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
+        } ${value !== 'auto' ? 'bg-codex-live/10 border border-codex-live/30' : 'bg-white/5'}`}
+      >
+        <span className={`text-lg font-medium transition-colors ${value !== 'auto' ? 'text-codex-live' : 'text-codex-muted'}`}>
+          {selected.icon}
+        </span>
+      </button>
+      {isOpen && !disabled && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
+          <div className="absolute top-full mt-1 z-50 flex justify-center" style={{ left: '50%', transform: 'translateX(-50%)' }}>
+            <div className="bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-48">
+              {options.map((opt) => (
+                <button
+                  key={opt.code}
+                  onClick={() => {
+                    onChange(opt.code);
+                    localStorage.setItem('translatorDirection', opt.code);
+                    setIsOpen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2.5 transition-colors ${
+                    value === opt.code ? 'bg-white/10' : 'hover:bg-white/5'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`text-base ${value === opt.code ? 'text-codex-live' : 'text-codex-muted'}`}>{opt.icon}</span>
+                    <div>
+                      <div className={`text-sm ${value === opt.code ? 'text-codex-text' : 'text-codex-text-secondary'}`}>{opt.label}</div>
+                      <div className="text-[10px] text-codex-muted">{opt.desc}</div>
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Language selector
 function LanguageSelector({ value, onChange, disabled }) {
   const [isOpen, setIsOpen] = useState(false);
@@ -148,6 +205,9 @@ export default function App() {
   const [isSubtitleMode, setIsSubtitleMode] = useState(false);
   const [subtitlePosition, setSubtitlePosition] = useState(() => localStorage.getItem('translatorSubtitlePosition') || 'bottom');
   const [subtitleHovered, setSubtitleHovered] = useState(false);
+  const [direction, setDirection] = useState(() => localStorage.getItem('translatorDirection') || 'auto');
+  const [subtitleQueue, setSubtitleQueue] = useState([]);
+  const [currentSubtitle, setCurrentSubtitle] = useState('');
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -164,6 +224,12 @@ export default function App() {
   const speechStartRef = useRef(null);
   const isListeningRef = useRef(false);
   const scrollRef = useRef(null);
+  const subtitleTimerRef = useRef(null);
+  const subtitleQueueRef = useRef([]);
+  const lastProcessedIndexRef = useRef(-1);
+  const isProcessingQueueRef = useRef(false);
+  const subtitleContainerRef = useRef(null);
+  const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
 
   const SILENCE_THRESHOLD = 0.05;
   const SILENCE_DURATION_MS = 600;
@@ -191,6 +257,7 @@ export default function App() {
       setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
       setSelectedMic(localStorage.getItem('translatorMic') || '');
       setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
+      setDirection(localStorage.getItem('translatorDirection') || 'auto');
     };
     window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
     
@@ -332,9 +399,22 @@ export default function App() {
       );
       ws.onopen = () => {
         updateStatus('connected', 'Connected');
-        let instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+        let instructions;
+        if (direction === 'a-to-b') {
+          instructions = `You are a real-time translator. Translate ${languageNames[langA]} to ${languageNames[langB]}. Output ONLY the translation, nothing else.`;
+        } else if (direction === 'b-to-a') {
+          instructions = `You are a real-time translator. Translate ${languageNames[langB]} to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+        } else {
+          instructions = `You are a real-time bidirectional translator between ${languageNames[langA]} and ${languageNames[langB]}. When you receive ${languageNames[langA]} text, translate to ${languageNames[langB]}. When you receive ${languageNames[langB]} text, translate to ${languageNames[langA]}. Output ONLY the translation, nothing else.`;
+        }
         if (customInstruction) {
           instructions += `\n\nAdditional context: ${customInstruction}`;
+        }
+        const transcriptionConfig = { model: 'whisper-1' };
+        if (direction === 'a-to-b') {
+          transcriptionConfig.language = langA;
+        } else if (direction === 'b-to-a') {
+          transcriptionConfig.language = langB;
         }
         ws.send(JSON.stringify({
           type: 'session.update',
@@ -342,7 +422,7 @@ export default function App() {
             modalities: ['text'],
             instructions,
             input_audio_format: 'pcm16',
-            input_audio_transcription: { model: 'whisper-1' },
+            input_audio_transcription: transcriptionConfig,
             turn_detection: null
           }
         }));
@@ -353,7 +433,7 @@ export default function App() {
       ws.onclose = () => { if (isListening) updateStatus('error', 'Disconnected'); };
       wsRef.current = ws;
     });
-  }, [langA, langB, apiKey, envApiKey, customInstruction, updateStatus, handleServerEvent, isListening]);
+  }, [langA, langB, apiKey, envApiKey, customInstruction, direction, updateStatus, handleServerEvent, isListening]);
 
   const startAudioCapture = useCallback(async () => {
     try {
@@ -487,6 +567,149 @@ export default function App() {
     return () => { if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current); };
   }, [isListening, visualize]);
 
+  // Calculate max characters per line based on container width and font size
+  useEffect(() => {
+    if (!isSubtitleMode || !subtitleContainerRef.current) return;
+
+    const calculateMaxChars = () => {
+      const container = subtitleContainerRef.current;
+      if (!container) return;
+
+      const containerWidth = container.clientWidth - 64; // px-8 = 32px * 2
+      const containerHeight = container.clientHeight;
+
+      // Font size is clamp(24px, 35vh, 120px)
+      const fontSize = Math.min(120, Math.max(24, containerHeight * 0.35));
+
+      // Approximate character width (varies by language, use conservative estimate)
+      // For mixed content, assume average ~0.6em per character
+      const avgCharWidth = fontSize * 0.6;
+      const maxChars = Math.floor(containerWidth / avgCharWidth);
+
+      setMaxCharsPerLine(Math.max(10, maxChars));
+    };
+
+    calculateMaxChars();
+
+    const resizeObserver = new ResizeObserver(calculateMaxChars);
+    resizeObserver.observe(subtitleContainerRef.current);
+
+    return () => resizeObserver.disconnect();
+  }, [isSubtitleMode]);
+
+  // Subtitle queue processing
+  const splitTextIntoChunks = useCallback((text, maxChars) => {
+    if (!text || text.length <= maxChars) return [text];
+
+    const chunks = [];
+    // First, try to split by sentences
+    const sentences = text.split(/(?<=[.!?。！？])\s*/);
+
+    for (const sentence of sentences) {
+      if (sentence.length <= maxChars) {
+        chunks.push(sentence);
+      } else {
+        // Split long sentences by commas or natural breaks
+        const parts = sentence.split(/(?<=[,，、;；])\s*/);
+        let current = '';
+        for (const part of parts) {
+          if ((current + part).length <= maxChars) {
+            current += (current ? ' ' : '') + part;
+          } else {
+            if (current) chunks.push(current);
+            // If single part is still too long, force split by character count
+            if (part.length > maxChars) {
+              const words = part.split(/\s+/);
+              current = '';
+              for (const word of words) {
+                if ((current + ' ' + word).length <= maxChars) {
+                  current += (current ? ' ' : '') + word;
+                } else {
+                  if (current) chunks.push(current);
+                  current = word;
+                }
+              }
+            } else {
+              current = part;
+            }
+          }
+        }
+        if (current) chunks.push(current);
+      }
+    }
+    return chunks.filter(c => c.trim());
+  }, []);
+
+  // Start processing the subtitle queue - reads from queue dynamically
+  const startQueueProcessing = useCallback(() => {
+    if (isProcessingQueueRef.current) return;
+    if (subtitleQueueRef.current.length === 0) return;
+
+    isProcessingQueueRef.current = true;
+
+    const showNextChunk = () => {
+      if (subtitleQueueRef.current.length === 0) {
+        isProcessingQueueRef.current = false;
+        subtitleTimerRef.current = null;
+        return;
+      }
+
+      const chunk = subtitleQueueRef.current.shift();
+      setSubtitleQueue([...subtitleQueueRef.current]);
+
+      // 짧은 문장은 빠르게, 긴 문장은 적당히
+      const displayTime = Math.max(1200, 800 + chunk.length * 70);
+      setCurrentSubtitle(chunk);
+
+      subtitleTimerRef.current = setTimeout(showNextChunk, displayTime);
+    };
+
+    showNextChunk();
+  }, []);
+
+  // Process new translations into subtitle queue
+  useEffect(() => {
+    if (!isSubtitleMode) return;
+
+    // Skip streaming updates in subtitle mode - only show completed translations via queue
+    if (currentTranslation) {
+      return;
+    }
+
+    // Process completed translations
+    const latestIndex = translatedText.length - 1;
+    if (latestIndex < 0 || latestIndex <= lastProcessedIndexRef.current) return;
+
+    const newText = translatedText[latestIndex];
+    lastProcessedIndexRef.current = latestIndex;
+
+    const chunks = splitTextIntoChunks(newText, maxCharsPerLine);
+
+    // ADD to existing queue instead of replacing
+    subtitleQueueRef.current = [...subtitleQueueRef.current, ...chunks];
+    setSubtitleQueue([...subtitleQueueRef.current]);
+
+    // Start processing if not already running
+    if (!isProcessingQueueRef.current) {
+      setTimeout(() => startQueueProcessing(), 50);
+    }
+  }, [isSubtitleMode, translatedText, currentTranslation, splitTextIntoChunks, maxCharsPerLine, startQueueProcessing]);
+
+  // Clear subtitle queue when exiting subtitle mode
+  useEffect(() => {
+    if (!isSubtitleMode) {
+      subtitleQueueRef.current = [];
+      setSubtitleQueue([]);
+      setCurrentSubtitle('');
+      lastProcessedIndexRef.current = -1;
+      isProcessingQueueRef.current = false;
+      if (subtitleTimerRef.current) {
+        clearTimeout(subtitleTimerRef.current);
+        subtitleTimerRef.current = null;
+      }
+    }
+  }, [isSubtitleMode]);
+
   // Subtitle Mode UI
   const subtitleHoverTimeoutRef = useRef(null);
   
@@ -508,35 +731,47 @@ export default function App() {
   };
   
   if (isSubtitleMode) {
-    const latestTranslation = currentTranslation || translatedText[translatedText.length - 1] || '';
-    
+    const displayText = currentSubtitle || (isListening ? 'Listening...' : 'Ready');
+    const isStreaming = !!currentTranslation;
+    const hasQueue = subtitleQueueRef.current.length > 0;
+
     return (
-      <div 
+      <div
+        ref={subtitleContainerRef}
         className="h-full w-full bg-black/30 text-white relative drag-region"
         onMouseMove={handleSubtitleMouseMove}
         onMouseLeave={handleSubtitleMouseLeave}
       >
-        
+
         {/* Translation text - centered, fades when hovered */}
-        <div className={`absolute inset-0 flex items-center justify-center px-12 pointer-events-none transition-opacity duration-200 ${
+        <div className={`absolute inset-0 flex items-center justify-center px-8 pointer-events-none transition-opacity duration-200 ${
           subtitleHovered ? 'opacity-30' : 'opacity-100'
         }`}>
-          <p 
-            className={`font-bold text-center leading-snug text-white line-clamp-2 ${
-              latestTranslation.length > 100 ? 'text-lg' :
-              latestTranslation.length > 60 ? 'text-xl' :
-              latestTranslation.length > 30 ? 'text-2xl' : 'text-3xl'
-            }`}
-            style={{ textShadow: '0 2px 8px rgba(0,0,0,1), 0 0 30px rgba(0,0,0,0.8), 0 0 60px rgba(0,0,0,0.5)' }}
+          <p
+            className="font-bold text-center leading-tight text-white"
+            style={{
+              fontSize: 'clamp(24px, 35vh, 120px)',
+              textShadow: '0 2px 8px rgba(0,0,0,1), 0 0 30px rgba(0,0,0,0.8), 0 0 60px rgba(0,0,0,0.5)'
+            }}
           >
-            {latestTranslation || (isListening ? 'Listening...' : 'Ready')}
-            {currentTranslation && (
-              <span className={`inline-block w-[3px] bg-codex-live ml-1 animate-blink ${
-                latestTranslation.length > 60 ? 'h-5' : 'h-7'
-              }`} />
+            {displayText}
+            {isStreaming && (
+              <span
+                className="inline-block w-[3px] bg-codex-live ml-1 animate-blink"
+                style={{ height: '0.8em' }}
+              />
             )}
           </p>
         </div>
+
+        {/* Queue indicator */}
+        {hasQueue && !isStreaming && (
+          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1">
+            {subtitleQueueRef.current.slice(0, 5).map((_, i) => (
+              <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/40" />
+            ))}
+          </div>
+        )}
         
         {/* Controls - center, only visible on hover */}
         <div className={`absolute inset-0 flex items-center justify-center no-drag z-10 transition-opacity duration-200 ${
@@ -654,16 +889,7 @@ export default function App() {
       {/* Language Bar */}
       <div className="flex items-center justify-center gap-3 px-4 py-3 border-b border-codex-border-subtle">
         <LanguageSelector value={langA} onChange={setLangA} disabled={isListening} />
-        <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full transition-all ${
-          isListening ? 'bg-codex-live/10 border border-codex-live/30' : 'bg-white/5'
-        }`}>
-          <ArrowLeftRight size={14} className={`transition-colors ${
-            isListening ? 'text-codex-live' : 'text-codex-muted'
-          }`} />
-          <span className={`text-[10px] uppercase tracking-wide transition-colors ${
-            isListening ? 'text-codex-live' : 'text-codex-muted'
-          }`}>auto</span>
-        </div>
+        <DirectionSelector value={direction} onChange={setDirection} disabled={isListening} langA={langA} langB={langB} />
         <LanguageSelector value={langB} onChange={setLangB} disabled={isListening} />
       </div>
 
