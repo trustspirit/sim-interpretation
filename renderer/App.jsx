@@ -293,6 +293,10 @@ export default function App() {
   const lastProcessedIndexRef = useRef(-1);
   const isProcessingQueueRef = useRef(false);
   const subtitleContainerRef = useRef(null);
+  const showNextChunkRef = useRef(null);
+  const isSubtitleModeRef = useRef(false);
+  const subtitleChunkTimingsRef = useRef([]);
+  const pendingSubtitleStartRef = useRef(false);
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
 
   // Realtime audio output refs
@@ -300,9 +304,11 @@ export default function App() {
   const isPlayingRealtimeAudioRef = useRef(false);
   const nextPlayTimeRef = useRef(0);
   const isVoiceModeRef = useRef(false);
+  const currentAudioDurationRef = useRef(0);
+  const pendingAudioDurationRef = useRef(0);
 
   const SILENCE_THRESHOLD = 0.05;
-  const SILENCE_DURATION_MS = 600;
+  const SILENCE_DURATION_MS = 550;
   const MIN_SPEECH_DURATION_MS = 500;
 
   useEffect(() => {
@@ -388,6 +394,9 @@ export default function App() {
     const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
     audioBuffer.getChannelData(0).set(float32Data);
 
+    // Track total duration for subtitle sync
+    pendingAudioDurationRef.current += audioBuffer.duration;
+
     // Schedule playback
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
@@ -426,6 +435,58 @@ export default function App() {
       wsRef.current.send(JSON.stringify({ type: 'response.create' }));
       pendingTranscriptionsRef.current = [];
     }
+  }, []);
+
+  const startSyncedSubtitles = useCallback(() => {
+    if (subtitleQueueRef.current.length === 0 || isProcessingQueueRef.current) return;
+    
+    isProcessingQueueRef.current = true;
+    let chunkIndex = 0;
+    
+    const MS_PER_WORD = 280;
+    const MS_PER_CJK_CHAR = 135;
+    
+    const processChunks = () => {
+      if (subtitleQueueRef.current.length === 0) {
+        isProcessingQueueRef.current = false;
+        subtitleTimerRef.current = null;
+        subtitleChunkTimingsRef.current = [];
+        chunkIndex = 0;
+        return;
+      }
+
+      const chunk = subtitleQueueRef.current.shift();
+      setSubtitleQueue([...subtitleQueueRef.current]);
+      setCurrentSubtitle(chunk);
+
+      const timings = subtitleChunkTimingsRef.current;
+      const hasSpaces = /\s/.test(chunk);
+      let displayTime;
+      
+      if (hasSpaces) {
+        const wordCount = chunk.split(/\s+/).length;
+        displayTime = wordCount * MS_PER_WORD;
+      } else {
+        displayTime = chunk.length * MS_PER_CJK_CHAR;
+      }
+      
+      if (timings.length > 1) {
+        const totalChars = timings.reduce((sum, t) => sum + t.chunk.length, 0);
+        const ratio = chunk.length / totalChars;
+        const totalDuration = hasSpaces 
+          ? timings.reduce((sum, t) => sum + t.chunk.split(/\s+/).length * MS_PER_WORD, 0)
+          : totalChars * MS_PER_CJK_CHAR;
+        displayTime = Math.max(300, totalDuration * ratio);
+      }
+      
+      displayTime = Math.min(3000, Math.max(300, displayTime));
+      
+      subtitleTimerRef.current = setTimeout(processChunks, displayTime);
+      chunkIndex++;
+    };
+    
+    showNextChunkRef.current = processChunks;
+    processChunks();
   }, []);
 
   const handleServerEvent = useCallback((event) => {
@@ -490,13 +551,20 @@ export default function App() {
         updateStatus('connected', 'Connected');
         break;
       case 'response.audio.delta':
-        // Play audio chunk from Realtime API (streaming)
         if (event.delta && isVoiceModeRef.current) {
           playRealtimeAudioChunk(event.delta);
+          
+          if (isSubtitleModeRef.current && pendingSubtitleStartRef.current && subtitleQueueRef.current.length > 0) {
+            pendingSubtitleStartRef.current = false;
+            startSyncedSubtitles();
+          }
         }
         break;
       case 'response.audio.done':
         // Audio streaming complete
+        currentAudioDurationRef.current = pendingAudioDurationRef.current;
+        pendingAudioDurationRef.current = 0;
+        
         setTimeout(() => {
           isPlayingRealtimeAudioRef.current = false;
           setIsSpeakingTTS(false);
@@ -509,7 +577,7 @@ export default function App() {
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, requestTranslation, playRealtimeAudioChunk]);
+  }, [updateStatus, requestTranslation, playRealtimeAudioChunk, startSyncedSubtitles]);
 
   const visualize = useCallback(() => {
     if (!analyserRef.current || !isListeningRef.current) return;
@@ -789,86 +857,78 @@ CRITICAL RULES:
     return () => resizeObserver.disconnect();
   }, [isSubtitleMode]);
 
-  // Subtitle queue processing
-  const splitTextIntoChunks = useCallback((text, maxChars) => {
+  const splitTextIntoChunksSync = (text, maxChars) => {
     if (!text || text.length <= maxChars) return [text];
 
     const chunks = [];
-    // First, try to split by sentences
-    const sentences = text.split(/(?<=[.!?。！？])\s*/);
-
-    for (const sentence of sentences) {
-      if (sentence.length <= maxChars) {
-        chunks.push(sentence);
-      } else {
-        // Split long sentences by commas or natural breaks
-        const parts = sentence.split(/(?<=[,，、;；])\s*/);
-        let current = '';
-        for (const part of parts) {
-          if ((current + part).length <= maxChars) {
-            current += (current ? ' ' : '') + part;
-          } else {
-            if (current) chunks.push(current);
-            // If single part is still too long, force split by character count
-            if (part.length > maxChars) {
-              const words = part.split(/\s+/);
-              current = '';
-              for (const word of words) {
-                if ((current + ' ' + word).length <= maxChars) {
-                  current += (current ? ' ' : '') + word;
-                } else {
-                  if (current) chunks.push(current);
-                  current = word;
-                }
-              }
-            } else {
-              current = part;
+    const hasSpaces = /\s/.test(text);
+    
+    if (hasSpaces) {
+      const words = text.split(/\s+/);
+      let current = '';
+      
+      for (const word of words) {
+        const testLine = current ? `${current} ${word}` : word;
+        
+        if (testLine.length <= maxChars) {
+          current = testLine;
+        } else {
+          if (current) chunks.push(current);
+          
+          if (word.length > maxChars) {
+            for (let i = 0; i < word.length; i += maxChars) {
+              chunks.push(word.slice(i, i + maxChars));
             }
+            current = '';
+          } else {
+            current = word;
           }
         }
-        if (current) chunks.push(current);
       }
+      
+      if (current) chunks.push(current);
+    } else {
+      // CJK languages: split at punctuation, then by character count
+      const breakPoints = /([。！？，、；：])/g;
+      const parts = text.split(breakPoints).filter(p => p);
+      
+      let current = '';
+      for (const part of parts) {
+        if ((current + part).length <= maxChars) {
+          current += part;
+        } else {
+          if (current) chunks.push(current);
+          
+          if (part.length > maxChars) {
+            for (let i = 0; i < part.length; i += maxChars) {
+              const slice = part.slice(i, i + maxChars);
+              if (i + maxChars < part.length) {
+                chunks.push(slice);
+              } else {
+                current = slice;
+              }
+            }
+          } else {
+            current = part;
+          }
+        }
+      }
+      
+      if (current) chunks.push(current);
     }
+    
     return chunks.filter(c => c.trim());
-  }, []);
+  };
 
-  // Start processing the subtitle queue - reads from queue dynamically
-  const startQueueProcessing = useCallback(() => {
-    if (isProcessingQueueRef.current) return;
-    if (subtitleQueueRef.current.length === 0) return;
-
-    isProcessingQueueRef.current = true;
-
-    const showNextChunk = () => {
-      if (subtitleQueueRef.current.length === 0) {
-        isProcessingQueueRef.current = false;
-        subtitleTimerRef.current = null;
-        return;
-      }
-
-      const chunk = subtitleQueueRef.current.shift();
-      setSubtitleQueue([...subtitleQueueRef.current]);
-
-      // 짧은 문장은 빠르게, 긴 문장은 적당히
-      const displayTime = Math.max(1200, 800 + chunk.length * 70);
-      setCurrentSubtitle(chunk);
-
-      subtitleTimerRef.current = setTimeout(showNextChunk, displayTime);
-    };
-
-    showNextChunk();
+  const splitTextIntoChunks = useCallback((text, maxChars) => {
+    return splitTextIntoChunksSync(text, maxChars);
   }, []);
 
   // Process new translations into subtitle queue
   useEffect(() => {
     if (!isSubtitleMode) return;
+    if (currentTranslation) return;
 
-    // Skip streaming updates in subtitle mode - only show completed translations via queue
-    if (currentTranslation) {
-      return;
-    }
-
-    // Process completed translations
     const latestIndex = translatedText.length - 1;
     if (latestIndex < 0 || latestIndex <= lastProcessedIndexRef.current) return;
 
@@ -876,16 +936,28 @@ CRITICAL RULES:
     lastProcessedIndexRef.current = latestIndex;
 
     const chunks = splitTextIntoChunks(newText, maxCharsPerLine);
+    
+    const totalChars = chunks.reduce((sum, c) => sum + c.length, 0);
+    subtitleChunkTimingsRef.current = chunks.map(chunk => ({
+      chunk,
+      ratio: chunk.length / totalChars
+    }));
 
-    // ADD to existing queue instead of replacing
     subtitleQueueRef.current = [...subtitleQueueRef.current, ...chunks];
     setSubtitleQueue([...subtitleQueueRef.current]);
 
-    // Start processing if not already running
     if (!isProcessingQueueRef.current) {
-      setTimeout(() => startQueueProcessing(), 50);
+      if (isVoiceModeRef.current) {
+        pendingSubtitleStartRef.current = true;
+        if (isPlayingRealtimeAudioRef.current) {
+          startSyncedSubtitles();
+          pendingSubtitleStartRef.current = false;
+        }
+      } else {
+        startSyncedSubtitles();
+      }
     }
-  }, [isSubtitleMode, translatedText, currentTranslation, splitTextIntoChunks, maxCharsPerLine, startQueueProcessing]);
+  }, [isSubtitleMode, translatedText, currentTranslation, splitTextIntoChunks, maxCharsPerLine, startSyncedSubtitles]);
 
   // Clear subtitle queue when exiting subtitle mode
   useEffect(() => {
@@ -909,6 +981,11 @@ CRITICAL RULES:
       stopRealtimeAudio();
     }
   }, [isVoiceMode, stopRealtimeAudio]);
+
+  // Sync subtitle mode ref
+  useEffect(() => {
+    isSubtitleModeRef.current = isSubtitleMode;
+  }, [isSubtitleMode]);
 
   // Subtitle Mode UI
   const subtitleHoverTimeoutRef = useRef(null);
