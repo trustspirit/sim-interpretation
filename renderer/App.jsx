@@ -40,7 +40,6 @@ export default function App() {
   const [translatedText, setTranslatedText] = useState([]);
   const [currentTranslation, setCurrentTranslation] = useState('');
   const currentTranslationRef = useRef('');
-  const pendingTranscriptionsRef = useRef([]);
   
   // UI Settings
   const [fontSize, setFontSize] = useState(2);
@@ -63,6 +62,9 @@ export default function App() {
   const isListeningRef = useRef(false);
   const isVoiceModeRef = useRef(false);
   const isSubtitleModeRef = useRef(false);
+  const websocketRef = useRef(null);
+  const accumulatedTextRef = useRef('');  // Accumulate transcriptions until sentence ends
+  const sentenceTimeoutRef = useRef(null);  // Timeout to force response if no punctuation
 
   // Hooks
   const { microphones, selectedMic, selectMic, error: micError } = useMicrophones();
@@ -81,35 +83,137 @@ export default function App() {
     maxCharsPerLine 
   });
 
-  // Request translation
-  const requestTranslation = useCallback((ws) => {
-    if (pendingTranscriptionsRef.current.length > 0) {
-      ws.requestResponse();
-      pendingTranscriptionsRef.current = [];
+  // Check if text contains any sentence-ending punctuation (anywhere, not just end)
+  const containsSentencePunctuation = useCallback((text) => {
+    if (!text) return false;
+    // Korean, English, and common sentence-ending punctuation
+    return /[.!?。！？]/.test(text);
+  }, []);
+
+  // Check if text ends with sentence-ending punctuation
+  const endsWithPunctuation = useCallback((text) => {
+    if (!text) return false;
+    return /[.!?。！？]$/.test(text.trim());
+  }, []);
+
+  // Check if accumulated text is long enough to translate
+  const isTextSufficientLength = useCallback((text) => {
+    if (!text) return false;
+    const trimmed = text.trim();
+
+    // Check if it has CJK characters (Korean, Chinese, Japanese)
+    const hasCJK = /[\u3131-\uD79D\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]/.test(trimmed);
+
+    if (hasCJK) {
+      // For CJK: 15+ characters is usually a meaningful phrase
+      return trimmed.length >= 15;
+    } else {
+      // For alphabetic languages: 40+ characters or 5+ words
+      const wordCount = trimmed.split(/\s+/).length;
+      return trimmed.length >= 40 || wordCount >= 5;
     }
+  }, []);
+
+  // Check if we should request translation
+  const shouldRequestTranslation = useCallback((text) => {
+    if (!text) return { should: false, reason: '' };
+
+    if (endsWithPunctuation(text)) {
+      return { should: true, reason: 'ends with punctuation' };
+    }
+    if (containsSentencePunctuation(text)) {
+      return { should: true, reason: 'contains sentence punctuation' };
+    }
+    if (isTextSufficientLength(text)) {
+      return { should: true, reason: `sufficient length (${text.length} chars)` };
+    }
+    return { should: false, reason: '' };
+  }, [endsWithPunctuation, containsSentencePunctuation, isTextSufficientLength]);
+
+  // Try to request a response - allow parallel responses
+  const tryRequestResponse = useCallback(() => {
+    if (!accumulatedTextRef.current) {
+      return;
+    }
+
+    // Clear timeout if exists
+    if (sentenceTimeoutRef.current) {
+      clearTimeout(sentenceTimeoutRef.current);
+      sentenceTimeoutRef.current = null;
+    }
+
+    const textToTranslate = accumulatedTextRef.current;
+    accumulatedTextRef.current = '';  // Clear accumulated text immediately
+
+    console.log('[Response] Requesting response for:', textToTranslate);
+    websocketRef.current?.requestResponse();
   }, []);
 
   // Handle WebSocket events
   const handleServerEvent = useCallback((event) => {
+    // Debug: log important events
+    if (['input_audio_buffer.committed', 'conversation.item.input_audio_transcription.completed',
+         'response.done'].includes(event.type)) {
+      console.log('[Event]', event.type, event.transcript?.substring(0, 50) || '');
+    }
+
     switch (event.type) {
-      case 'input_audio_buffer.speech_started':
-        updateStatus('listening', 'Listening...');
+      case 'input_audio_buffer.committed':
+        // Audio buffer was committed (by our manual commit)
+        console.log('[Committed] Audio buffer committed');
         break;
-        
+
       case 'conversation.item.input_audio_transcription.completed':
-        if (event.transcript?.trim()) {
-          const text = event.transcript.trim();
-          if (!isHallucination(text)) {
-            setOriginalText(prev => [...prev, text]);
-            pendingTranscriptionsRef.current.push(text);
-            if (pendingTranscriptionsRef.current.length >= 1) {
-              websocket.requestResponse();
-              pendingTranscriptionsRef.current = [];
+        // Transcription completed - accumulate and check for sentence end
+        try {
+          const transcript = event.transcript?.trim();
+          console.log('[Transcription] Raw:', transcript?.substring(0, 80));
+
+          if (transcript) {
+            const isHalluc = isHallucination(transcript);
+            console.log('[Transcription] isHallucination:', isHalluc);
+
+            if (!isHalluc) {
+              // Always show original text
+              setOriginalText(prev => [...prev, transcript]);
+
+              // Accumulate transcription
+              accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + transcript;
+              console.log('[Accumulated]', accumulatedTextRef.current.substring(0, 100));
+
+              // Clear any existing timeout
+              if (sentenceTimeoutRef.current) {
+                clearTimeout(sentenceTimeoutRef.current);
+                sentenceTimeoutRef.current = null;
+              }
+
+              // Check if we should translate now
+              const result = shouldRequestTranslation(accumulatedTextRef.current);
+              console.log('[Check]', result);
+
+              if (result.should) {
+                console.log(`[Ready to translate] Reason: ${result.reason}`);
+                updateStatus('processing', 'Translating...');
+                tryRequestResponse();
+              } else {
+                console.log(`[Waiting] ${accumulatedTextRef.current.length} chars`);
+                updateStatus('listening', 'Listening...');
+                // Set timeout as fallback
+                sentenceTimeoutRef.current = setTimeout(() => {
+                  if (accumulatedTextRef.current) {
+                    console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars)`);
+                    updateStatus('processing', 'Translating...');
+                    tryRequestResponse();
+                  }
+                }, 2000);
+              }
             }
           }
+        } catch (err) {
+          console.error('[Transcription Error]', err);
         }
         break;
-        
+
       case 'response.text.delta':
       case 'response.audio_transcript.delta':
         if (event.delta) {
@@ -117,7 +221,7 @@ export default function App() {
           setCurrentTranslation(prev => prev + event.delta);
         }
         break;
-        
+
       case 'response.text.done':
       case 'response.audio_transcript.done':
         if (currentTranslationRef.current) {
@@ -126,17 +230,16 @@ export default function App() {
           currentTranslationRef.current = '';
           setCurrentTranslation('');
         }
-        updateStatus('connected', 'Connected');
         break;
-        
+
       case 'response.audio.delta':
         if (event.delta && isVoiceModeRef.current) {
           realtimeAudio.playAudioChunk(event.delta);
-          
+
           if (!isSpeakingTTS) {
             setIsSpeakingTTS(true);
           }
-          
+
           // Start subtitle sync if pending
           if (isSubtitleModeRef.current && subtitle.isPendingStart() && subtitle.hasQueue()) {
             subtitle.setPendingStart(false);
@@ -144,23 +247,25 @@ export default function App() {
           }
         }
         break;
-        
+
       case 'response.audio.done':
         realtimeAudio.onAudioDone();
         setTimeout(() => {
           setIsSpeakingTTS(false);
         }, 500);
         break;
-        
+
       case 'response.done':
+        // Response finished
+        console.log('[Response Done]');
         updateStatus('connected', 'Connected');
         break;
-        
+
       case 'error':
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, realtimeAudio, subtitle, isSpeakingTTS]);
+  }, [updateStatus, realtimeAudio, subtitle, isSpeakingTTS, shouldRequestTranslation, tryRequestResponse]);
 
   // WebSocket connection
   const websocket = useWebSocket({
@@ -169,16 +274,22 @@ export default function App() {
     direction,
     voiceType,
     customInstruction,
-    isVoiceMode: isVoiceModeRef.current,
+    isVoiceMode,
     onStatusChange: updateStatus,
     onServerEvent: handleServerEvent,
   });
 
-  // Audio capture
+  // Sync websocket ref for use in event handlers
+  websocketRef.current = websocket;
+
+  // Audio capture - always send audio, commit on silence
   const audioCapture = useAudioCapture({
     selectedMic,
     onAudioData: (base64Audio) => websocket.sendAudio(base64Audio),
-    onCommit: () => websocket.commitAudio(),
+    onCommit: () => {
+      console.log('[VAD] Committing audio buffer');
+      websocket.commitAudio();
+    },
     onError: (msg) => updateStatus('error', msg),
   });
 
@@ -207,7 +318,11 @@ export default function App() {
     isListeningRef.current = false;
     setIsListening(false);
     setAudioLevel(0);
-    pendingTranscriptionsRef.current = [];
+    accumulatedTextRef.current = '';
+    if (sentenceTimeoutRef.current) {
+      clearTimeout(sentenceTimeoutRef.current);
+      sentenceTimeoutRef.current = null;
+    }
     audioCapture.stopCapture();
     websocket.disconnect();
     realtimeAudio.resetTiming();

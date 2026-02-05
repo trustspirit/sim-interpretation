@@ -64,7 +64,7 @@ CRITICAL RULES:
           instructions,
           input_audio_format: 'pcm16',
           input_audio_transcription: transcriptionConfig,
-          turn_detection: null
+          turn_detection: null  // 수동 제어 - 직접 commit하고 response 요청
         };
 
         // Add voice config if voice mode is enabled

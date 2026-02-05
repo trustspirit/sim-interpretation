@@ -87,6 +87,15 @@ async function createWindow() {
   });
 
   mainWindow.loadFile('dist/index.html');
+
+  // Open DevTools with Cmd+Option+I (Mac) or Ctrl+Shift+I (Windows/Linux)
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if ((input.meta && input.alt && input.key === 'i') ||
+        (input.control && input.shift && input.key === 'I') ||
+        input.key === 'F12') {
+      mainWindow.webContents.toggleDevTools();
+    }
+  });
 }
 
 // Window control handlers
@@ -108,6 +117,10 @@ ipcMain.on('window-maximize', () => {
 
 ipcMain.on('open-settings', () => {
   createSettingsWindow();
+});
+
+ipcMain.on('toggle-devtools', () => {
+  mainWindow?.webContents.toggleDevTools();
 });
 
 ipcMain.on('close-settings', () => {

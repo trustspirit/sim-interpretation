@@ -1,5 +1,9 @@
 import { useRef, useCallback } from 'react';
-import { SILENCE_THRESHOLD, SILENCE_DURATION_MS, MIN_SPEECH_DURATION_MS } from '../constants';
+
+// Audio detection thresholds
+const SILENCE_THRESHOLD = 0.05;
+const SILENCE_DURATION_MS = 550;  // 550ms 침묵 시 commit
+const MIN_SPEECH_DURATION_MS = 300;
 
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
@@ -11,45 +15,47 @@ const arrayBufferToBase64 = (buffer) => {
   return btoa(binary);
 };
 
-export default function useAudioCapture({ 
-  selectedMic, 
-  onAudioData, 
+export default function useAudioCapture({
+  selectedMic,
+  onAudioData,
   onCommit,
-  onError 
+  onError
 }) {
   const audioContextRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioWorkletNodeRef = useRef(null);
   const analyserRef = useRef(null);
   const animationIdRef = useRef(null);
-  
+
+  const isActiveRef = useRef(false);
+  const audioLevelRef = useRef(0);
+
+  // Silence detection refs
   const isSpeakingRef = useRef(false);
   const silenceStartRef = useRef(null);
   const speechStartRef = useRef(null);
-  const isActiveRef = useRef(false);
-  const audioLevelRef = useRef(0);
 
   const startCapture = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { 
-          deviceId: selectedMic ? { exact: selectedMic } : undefined, 
-          echoCancellation: true, 
-          noiseSuppression: true, 
-          autoGainControl: true 
+        audio: {
+          deviceId: selectedMic ? { exact: selectedMic } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
         }
       });
-      
+
       mediaStreamRef.current = stream;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      
+
       await audioContextRef.current.audioWorklet.addModule('audio-processor.js');
-      
+
       const source = audioContextRef.current.createMediaStreamSource(stream);
       analyserRef.current = audioContextRef.current.createAnalyser();
       analyserRef.current.fftSize = 256;
       source.connect(analyserRef.current);
-      
+
       const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       worklet.port.onmessage = (event) => {
         if (event.data.type === 'audio' && isActiveRef.current) {
@@ -59,7 +65,7 @@ export default function useAudioCapture({
       };
       source.connect(worklet);
       audioWorkletNodeRef.current = worklet;
-      
+
       isActiveRef.current = true;
       return true;
     } catch (error) {
@@ -74,17 +80,17 @@ export default function useAudioCapture({
     isSpeakingRef.current = false;
     silenceStartRef.current = null;
     speechStartRef.current = null;
-    
+
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);
       animationIdRef.current = null;
     }
-    
+
     audioWorkletNodeRef.current?.disconnect();
     analyserRef.current?.disconnect();
     audioContextRef.current?.close();
     mediaStreamRef.current?.getTracks().forEach(t => t.stop());
-    
+
     audioWorkletNodeRef.current = null;
     analyserRef.current = null;
     audioContextRef.current = null;
@@ -93,7 +99,7 @@ export default function useAudioCapture({
 
   const visualize = useCallback((onLevelChange) => {
     if (!analyserRef.current || !isActiveRef.current) return 0;
-    
+
     const bufferLength = analyserRef.current.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
     analyserRef.current.getByteTimeDomainData(dataArray);
@@ -107,6 +113,7 @@ export default function useAudioCapture({
     audioLevelRef.current = level;
     onLevelChange?.(level);
 
+    // Silence detection for commit
     const now = Date.now();
     if (level > SILENCE_THRESHOLD) {
       if (!isSpeakingRef.current) {
@@ -123,6 +130,7 @@ export default function useAudioCapture({
         silenceStartRef.current = null;
         speechStartRef.current = null;
         if (speechDuration >= MIN_SPEECH_DURATION_MS) {
+          console.log(`[VAD] Silence detected after ${speechDuration}ms of speech, triggering commit`);
           onCommit?.();
         }
       }

@@ -1,8 +1,3 @@
-// Audio detection thresholds
-export const SILENCE_THRESHOLD = 0.05;
-export const SILENCE_DURATION_MS = 550;
-export const MIN_SPEECH_DURATION_MS = 500;
-
 // Subtitle timing
 export const MS_PER_WORD = 280;
 export const MS_PER_CJK_CHAR = 135;
@@ -23,9 +18,9 @@ export const getFontSizeClasses = (fontSize) => ({
   cursor: fontSizeConfig.cursor[fontSize]
 });
 
-// Common hallucination patterns to filter out
-export const hallucinations = [
-  // Korean hallucinations
+// Common hallucination patterns to filter out (exact match only)
+export const exactHallucinations = [
+  // Korean hallucinations - standalone phrases only
   '구독과 좋아요 부탁드립니다',
   '좋아요와 구독 부탁드립니다',
   '오늘도 시청해주셔서 감사합니다',
@@ -37,7 +32,6 @@ export const hallucinations = [
   'KBS 뉴스',
   'SBS 뉴스',
   '이덕영입니다',
-  '입니다',
   // English hallucinations
   'Thank you for watching',
   'Thanks for watching',
@@ -45,15 +39,22 @@ export const hallucinations = [
   'Adjust the compressor',
   'Please subscribe',
   'Like and subscribe',
-  // Symbols and markers
-  '....', '...', '..', '♪', '[음악]', '[박수]', '[웃음]',
+  // Short meaningless patterns
+  '....', '...', '..', '♪',
+];
+
+// Patterns that indicate hallucination if text contains them
+export const containsHallucinations = [
+  '[음악]', '[박수]', '[웃음]',
   '[Music]', '[Applause]', '[Laughter]', '[BLANK_AUDIO]',
   '(upbeat music)', '(dramatic music)', '(sighs)',
 ];
 
 // Check if text is a hallucination
 export const isHallucination = (text) => {
-  return hallucinations.some(h =>
-    text === h || text.includes(h) || text.startsWith('♪') || text.startsWith('[')
-  ) || text.length < 4;
+  if (!text || text.length < 4) return true;
+  if (text.startsWith('♪') || text.startsWith('[') || text.startsWith('(')) return true;
+  if (exactHallucinations.includes(text)) return true;
+  if (containsHallucinations.some(h => text.includes(h))) return true;
+  return false;
 };
