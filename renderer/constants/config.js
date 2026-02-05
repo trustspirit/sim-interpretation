@@ -1,0 +1,59 @@
+// Audio detection thresholds
+export const SILENCE_THRESHOLD = 0.05;
+export const SILENCE_DURATION_MS = 550;
+export const MIN_SPEECH_DURATION_MS = 500;
+
+// Subtitle timing
+export const MS_PER_WORD = 280;
+export const MS_PER_CJK_CHAR = 135;
+export const MIN_SUBTITLE_DISPLAY_MS = 300;
+export const MAX_SUBTITLE_DISPLAY_MS = 3000;
+
+// Font size configuration
+export const fontSizeConfig = {
+  current: ['text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl', 'text-7xl'],
+  previous: ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl'],
+  cursor: ['h-6', 'h-8', 'h-10', 'h-12', 'h-14', 'h-16']
+};
+
+// Get font size classes by index
+export const getFontSizeClasses = (fontSize) => ({
+  current: fontSizeConfig.current[fontSize],
+  previous: fontSizeConfig.previous[fontSize],
+  cursor: fontSizeConfig.cursor[fontSize]
+});
+
+// Common hallucination patterns to filter out
+export const hallucinations = [
+  // Korean hallucinations
+  '구독과 좋아요 부탁드립니다',
+  '좋아요와 구독 부탁드립니다',
+  '오늘도 시청해주셔서 감사합니다',
+  '오늘도 시청해 주셔서 감사합니다',
+  '시청해주셔서 감사합니다',
+  '시청해 주셔서 감사합니다',
+  '감사합니다',
+  'MBC 뉴스',
+  'KBS 뉴스',
+  'SBS 뉴스',
+  '이덕영입니다',
+  '입니다',
+  // English hallucinations
+  'Thank you for watching',
+  'Thanks for watching',
+  'Thank you',
+  'Adjust the compressor',
+  'Please subscribe',
+  'Like and subscribe',
+  // Symbols and markers
+  '....', '...', '..', '♪', '[음악]', '[박수]', '[웃음]',
+  '[Music]', '[Applause]', '[Laughter]', '[BLANK_AUDIO]',
+  '(upbeat music)', '(dramatic music)', '(sighs)',
+];
+
+// Check if text is a hallucination
+export const isHallucination = (text) => {
+  return hallucinations.some(h =>
+    text === h || text.includes(h) || text.startsWith('♪') || text.startsWith('[')
+  ) || text.length < 4;
+};

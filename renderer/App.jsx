@@ -1,538 +1,115 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  Play,
-  Square,
-  Trash2,
-  ArrowLeftRight,
-  ChevronDown,
-  X,
-  Circle,
-  Type,
-  ArrowDown,
-  ArrowUp,
-  Settings,
-  PanelTop,
-  Maximize2,
-  Volume2,
-  VolumeX,
-  Eye,
-  EyeOff
-} from 'lucide-react';
 
-// Language configuration
-const languages = [
-  { code: 'en', name: 'English' },
-  { code: 'ko', name: 'Korean' },
-  { code: 'ja', name: 'Japanese' },
-  { code: 'zh', name: 'Chinese' },
-  { code: 'es', name: 'Spanish' },
-  { code: 'fr', name: 'French' },
-  { code: 'de', name: 'German' }
-];
+// Components
+import { Header, LanguageBar, ControlBar } from './components/layout';
+import { TranslationDisplay, SubtitleMode } from './components/translation';
 
-const languageNames = {
-  en: 'English', ko: 'Korean', ja: 'Japanese',
-  zh: 'Chinese', es: 'Spanish', fr: 'French', de: 'German'
-};
+// Hooks
+import { 
+  useAudioCapture, 
+  useRealtimeAudio, 
+  useWebSocket, 
+  useSubtitle, 
+  useMicrophones 
+} from './hooks';
 
-// Window controls component
-function WindowControls() {
-  const [isHovered, setIsHovered] = useState(false);
+// Constants
+import { isHallucination } from './constants';
 
-  const handleClose = () => window.electronAPI?.closeWindow?.();
-  const handleMinimize = () => window.electronAPI?.minimizeWindow?.();
-  const handleMaximize = () => window.electronAPI?.maximizeWindow?.();
-
-  return (
-    <div
-      className="flex items-center gap-2 mr-4"
-      onMouseEnter={() => setIsHovered(true)}
-      onMouseLeave={() => setIsHovered(false)}
-    >
-      <button
-        onClick={handleClose}
-        className={`w-3 h-3 rounded-full transition-all duration-150 ${
-          isHovered ? 'bg-[#ff5f57]' : 'bg-codex-muted/50'
-        }`}
-      />
-      <button
-        onClick={handleMinimize}
-        className={`w-3 h-3 rounded-full transition-all duration-150 ${
-          isHovered ? 'bg-[#febc2e]' : 'bg-codex-muted/50'
-        }`}
-      />
-      <button
-        onClick={handleMaximize}
-        className={`w-3 h-3 rounded-full transition-all duration-150 ${
-          isHovered ? 'bg-[#28c840]' : 'bg-codex-muted/50'
-        }`}
-      />
-    </div>
-  );
-}
-
-// Audio wave component
-function AudioWave({ isActive, audioLevel }) {
-  const bars = 4;
-  return (
-    <div className="flex items-center gap-[2px] h-3">
-      {[...Array(bars)].map((_, i) => {
-        const scale = isActive ? 0.3 + audioLevel * 0.7 + Math.sin(Date.now() / 120 + i * 0.8) * 0.2 : 0.15;
-        return (
-          <div
-            key={i}
-            className="w-[2px] bg-codex-live rounded-full transition-all duration-75"
-            style={{ height: `${Math.max(3, scale * 12)}px` }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-// Voice selector for TTS
-const voiceOptions = [
-  { code: 'alloy', name: 'Alloy', desc: 'Neutral' },
-  { code: 'echo', name: 'Echo', desc: 'Male' },
-  { code: 'fable', name: 'Fable', desc: 'British' },
-  { code: 'onyx', name: 'Onyx', desc: 'Deep male' },
-  { code: 'nova', name: 'Nova', desc: 'Female' },
-  { code: 'shimmer', name: 'Shimmer', desc: 'Soft female' },
-];
-
-function VoiceSelector({ value, onChange, disabled }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const selected = voiceOptions.find(v => v.code === value) || voiceOptions[4];
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        disabled={disabled}
-        className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs transition-all ${
-          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
-        } bg-codex-surface border border-codex-border`}
-      >
-        <Volume2 size={12} className="text-codex-muted" />
-        <span className="text-codex-text">{selected.name}</span>
-        <ChevronDown size={10} className={`text-codex-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-      </button>
-      {isOpen && !disabled && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute bottom-full right-0 mb-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-40">
-            {voiceOptions.map((voice) => (
-              <button
-                key={voice.code}
-                onClick={() => {
-                  onChange(voice.code);
-                  localStorage.setItem('translatorVoice', voice.code);
-                  setIsOpen(false);
-                }}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                  value === voice.code ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
-                }`}
-              >
-                <div className="flex justify-between items-center gap-3">
-                  <span>{voice.name}</span>
-                  <span className="text-[10px] text-codex-muted whitespace-nowrap">{voice.desc}</span>
-                </div>
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// Direction selector (auto ↔, A→B, B←A)
-function DirectionSelector({ value, onChange, disabled, langA, langB }) {
-  const [isOpen, setIsOpen] = useState(false);
-
-  const options = [
-    { code: 'auto', label: 'Auto', icon: '↔', desc: 'Auto-detect language' },
-    { code: 'a-to-b', label: `${languageNames[langA]} → ${languageNames[langB]}`, icon: '→', desc: `Speak ${languageNames[langA]}` },
-    { code: 'b-to-a', label: `${languageNames[langB]} → ${languageNames[langA]}`, icon: '←', desc: `Speak ${languageNames[langB]}` },
-  ];
-  const selected = options.find(o => o.code === value) || options[0];
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        disabled={disabled}
-        title={selected.desc}
-        className={`flex items-center justify-center w-8 h-8 rounded-lg transition-all ${
-          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/10 cursor-pointer'
-        } ${value !== 'auto' ? 'bg-codex-live/10 border border-codex-live/30' : 'bg-white/5'}`}
-      >
-        <span className={`text-lg font-medium transition-colors ${value !== 'auto' ? 'text-codex-live' : 'text-codex-muted'}`}>
-          {selected.icon}
-        </span>
-      </button>
-      {isOpen && !disabled && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute top-full mt-1 z-50 flex justify-center" style={{ left: '50%', transform: 'translateX(-50%)' }}>
-            <div className="bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-48">
-              {options.map((opt) => (
-                <button
-                  key={opt.code}
-                  onClick={() => {
-                    onChange(opt.code);
-                    localStorage.setItem('translatorDirection', opt.code);
-                    setIsOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2.5 transition-colors ${
-                    value === opt.code ? 'bg-white/10' : 'hover:bg-white/5'
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`text-base ${value === opt.code ? 'text-codex-live' : 'text-codex-muted'}`}>{opt.icon}</span>
-                    <div>
-                      <div className={`text-sm ${value === opt.code ? 'text-codex-text' : 'text-codex-text-secondary'}`}>{opt.label}</div>
-                      <div className="text-[10px] text-codex-muted">{opt.desc}</div>
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// Language selector
-function LanguageSelector({ value, onChange, disabled }) {
-  const [isOpen, setIsOpen] = useState(false);
-  const selected = languages.find(l => l.code === value);
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setIsOpen(!isOpen)}
-        disabled={disabled}
-        className={`flex items-center gap-2 px-3 py-2 bg-codex-surface border border-codex-border rounded-lg text-sm transition-all ${
-          disabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-codex-elevated hover:border-codex-border cursor-pointer'
-        }`}
-      >
-        <span className="text-codex-text">{selected?.name}</span>
-        <ChevronDown size={14} className={`text-codex-muted transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-      </button>
-      {isOpen && !disabled && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
-          <div className="absolute top-full left-0 mt-1 z-50 bg-codex-elevated border border-codex-border rounded-lg shadow-xl overflow-hidden min-w-32 animate-fade-in">
-            {languages.map((lang) => (
-              <button
-                key={lang.code}
-                onClick={() => { onChange(lang.code); setIsOpen(false); }}
-                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                  value === lang.code ? 'bg-white/10 text-codex-text' : 'text-codex-text-secondary hover:bg-white/5'
-                }`}
-              >
-                {lang.name}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// Main App
 export default function App() {
+  // Connection & Status
   const [status, setStatus] = useState('ready');
   const [statusText, setStatusText] = useState('Ready');
+  const [isListening, setIsListening] = useState(false);
+  
+  // Language settings
   const [langA, setLangA] = useState('en');
   const [langB, setLangB] = useState('ko');
-  const [isListening, setIsListening] = useState(false);
-  const [microphones, setMicrophones] = useState([]);
-  const [selectedMic, setSelectedMic] = useState(() => localStorage.getItem('translatorMic') || '');
+  const [direction, setDirection] = useState(() => localStorage.getItem('translatorDirection') || 'auto');
+  
+  // API & Settings
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('translatorApiKey') || '');
   const [customInstruction, setCustomInstruction] = useState(() => localStorage.getItem('translatorInstruction') || '');
   const envApiKey = window.electronAPI?.getApiKey?.() || '';
+  
+  // Audio level for visualization
   const [audioLevel, setAudioLevel] = useState(0);
+  
+  // Transcription & Translation
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
   const [currentTranslation, setCurrentTranslation] = useState('');
-  const [fontSize, setFontSize] = useState(2); // 0: small, 1: medium, 2: large, 3: x-large, 4: xx-large, 5: xxx-large
-  const [textDirection, setTextDirection] = useState('down'); // 'down': top to bottom, 'up': bottom to top
+  const currentTranslationRef = useRef('');
+  const pendingTranscriptionsRef = useRef([]);
+  
+  // UI Settings
+  const [fontSize, setFontSize] = useState(2);
+  const [textDirection, setTextDirection] = useState('down');
   const [isSubtitleMode, setIsSubtitleMode] = useState(false);
-  const [subtitlePosition, setSubtitlePosition] = useState(() => localStorage.getItem('translatorSubtitlePosition') || 'bottom');
-  const [subtitleHovered, setSubtitleHovered] = useState(false);
-  const [direction, setDirection] = useState(() => localStorage.getItem('translatorDirection') || 'auto');
-  const [subtitleQueue, setSubtitleQueue] = useState([]);
-  const [currentSubtitle, setCurrentSubtitle] = useState('');
+  const [subtitlePosition, setSubtitlePosition] = useState(() => 
+    localStorage.getItem('translatorSubtitlePosition') || 'bottom'
+  );
+  const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
+  
+  // Voice Mode
   const [isVoiceMode, setIsVoiceMode] = useState(false);
   const [voiceType, setVoiceType] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
   const [isSpeakingTTS, setIsSpeakingTTS] = useState(false);
-  const [voiceOnlyMode, setVoiceOnlyMode] = useState(() => localStorage.getItem('translatorVoiceOnly') === 'true');
-
-  const wsRef = useRef(null);
-  const audioContextRef = useRef(null);
-  const mediaStreamRef = useRef(null);
-  const audioWorkletNodeRef = useRef(null);
-  const analyserRef = useRef(null);
-  const animationIdRef = useRef(null);
-  const pendingTranscriptionsRef = useRef([]);
-  const micButtonRef = useRef(null);
-  const currentTranslationRef = useRef('');
-
-  const isSpeakingRef = useRef(false);
-  const silenceStartRef = useRef(null);
-  const speechStartRef = useRef(null);
+  const [voiceOnlyMode, setVoiceOnlyMode] = useState(() => 
+    localStorage.getItem('translatorVoiceOnly') === 'true'
+  );
+  
+  // Refs
   const isListeningRef = useRef(false);
-  const scrollRef = useRef(null);
-  const subtitleTimerRef = useRef(null);
-  const subtitleQueueRef = useRef([]);
-  const lastProcessedIndexRef = useRef(-1);
-  const isProcessingQueueRef = useRef(false);
-  const subtitleContainerRef = useRef(null);
-  const showNextChunkRef = useRef(null);
-  const isSubtitleModeRef = useRef(false);
-  const subtitleChunkTimingsRef = useRef([]);
-  const pendingSubtitleStartRef = useRef(false);
-  const [maxCharsPerLine, setMaxCharsPerLine] = useState(50);
-
-  // Realtime audio output refs
-  const outputAudioContextRef = useRef(null);
-  const isPlayingRealtimeAudioRef = useRef(false);
-  const nextPlayTimeRef = useRef(0);
   const isVoiceModeRef = useRef(false);
-  const currentAudioDurationRef = useRef(0);
-  const pendingAudioDurationRef = useRef(0);
+  const isSubtitleModeRef = useRef(false);
 
-  const SILENCE_THRESHOLD = 0.05;
-  const SILENCE_DURATION_MS = 550;
-  const MIN_SPEECH_DURATION_MS = 500;
-
-  useEffect(() => {
-    async function loadMicrophones() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach(track => track.stop());
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const mics = devices
-          .filter(d => d.kind === 'audioinput')
-          .map((mic, index) => ({ deviceId: mic.deviceId, label: mic.label, index }));
-        setMicrophones(mics);
-        if (mics.length > 0 && !selectedMic) setSelectedMic(mics[0].deviceId);
-      } catch (error) {
-        updateStatus('error', 'Mic access required');
-      }
-    }
-    loadMicrophones();
-
-    const handleSettingsClosed = () => {
-      setApiKey(localStorage.getItem('translatorApiKey') || '');
-      setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
-      setSelectedMic(localStorage.getItem('translatorMic') || '');
-      setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
-      setDirection(localStorage.getItem('translatorDirection') || 'auto');
-    };
-    window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
-    
-    // Check if we're already in subtitle mode
-    window.electronAPI?.getSubtitleMode?.().then(mode => {
-      setIsSubtitleMode(mode || false);
-    });
-  }, []);
-
+  // Hooks
+  const { microphones, selectedMic, selectMic, error: micError } = useMicrophones();
+  
   const updateStatus = useCallback((state, text) => {
     setStatus(state);
     setStatusText(text);
   }, []);
 
-  const arrayBufferToBase64 = (buffer) => {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary);
-  };
+  // Realtime audio playback
+  const realtimeAudio = useRealtimeAudio();
 
-  // Base64 to ArrayBuffer
-  const base64ToArrayBuffer = (base64) => {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes.buffer;
-  };
+  // Subtitle management
+  const subtitle = useSubtitle({ 
+    isEnabled: isSubtitleMode, 
+    maxCharsPerLine 
+  });
 
-  // Convert PCM16 to Float32 for Web Audio API
-  const pcm16ToFloat32 = (pcm16Buffer) => {
-    const int16Array = new Int16Array(pcm16Buffer);
-    const float32Array = new Float32Array(int16Array.length);
-    for (let i = 0; i < int16Array.length; i++) {
-      float32Array[i] = int16Array[i] / 32768;
-    }
-    return float32Array;
-  };
-
-  // Play audio chunk from Realtime API
-  const playRealtimeAudioChunk = useCallback((base64Audio) => {
-    if (!isVoiceModeRef.current) return;
-
-    // Initialize output audio context if needed
-    if (!outputAudioContextRef.current) {
-      outputAudioContextRef.current = new AudioContext({ sampleRate: 24000 });
-    }
-
-    const ctx = outputAudioContextRef.current;
-    if (ctx.state === 'suspended') {
-      ctx.resume();
-    }
-
-    const pcmBuffer = base64ToArrayBuffer(base64Audio);
-    const float32Data = pcm16ToFloat32(pcmBuffer);
-
-    // Create audio buffer
-    const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
-    audioBuffer.getChannelData(0).set(float32Data);
-
-    // Track total duration for subtitle sync
-    pendingAudioDurationRef.current += audioBuffer.duration;
-
-    // Schedule playback
-    const source = ctx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(ctx.destination);
-
-    const currentTime = ctx.currentTime;
-    const startTime = Math.max(currentTime, nextPlayTimeRef.current);
-    source.start(startTime);
-    nextPlayTimeRef.current = startTime + audioBuffer.duration;
-
-    if (!isPlayingRealtimeAudioRef.current) {
-      isPlayingRealtimeAudioRef.current = true;
-      setIsSpeakingTTS(true);
-    }
-  }, []);
-
-  // Stop realtime audio playback
-  const stopRealtimeAudio = useCallback(() => {
-    if (outputAudioContextRef.current) {
-      outputAudioContextRef.current.close();
-      outputAudioContextRef.current = null;
-    }
-    isPlayingRealtimeAudioRef.current = false;
-    nextPlayTimeRef.current = 0;
-    setIsSpeakingTTS(false);
-  }, []);
-
-  const commitAudio = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-    }
-  }, []);
-
-  const requestTranslation = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN && pendingTranscriptionsRef.current.length > 0) {
-      wsRef.current.send(JSON.stringify({ type: 'response.create' }));
+  // Request translation
+  const requestTranslation = useCallback((ws) => {
+    if (pendingTranscriptionsRef.current.length > 0) {
+      ws.requestResponse();
       pendingTranscriptionsRef.current = [];
     }
   }, []);
 
-  const startSyncedSubtitles = useCallback(() => {
-    if (subtitleQueueRef.current.length === 0 || isProcessingQueueRef.current) return;
-    
-    isProcessingQueueRef.current = true;
-    let chunkIndex = 0;
-    
-    const MS_PER_WORD = 280;
-    const MS_PER_CJK_CHAR = 135;
-    
-    const processChunks = () => {
-      if (subtitleQueueRef.current.length === 0) {
-        isProcessingQueueRef.current = false;
-        subtitleTimerRef.current = null;
-        subtitleChunkTimingsRef.current = [];
-        chunkIndex = 0;
-        return;
-      }
-
-      const chunk = subtitleQueueRef.current.shift();
-      setSubtitleQueue([...subtitleQueueRef.current]);
-      setCurrentSubtitle(chunk);
-
-      const timings = subtitleChunkTimingsRef.current;
-      const hasSpaces = /\s/.test(chunk);
-      let displayTime;
-      
-      if (hasSpaces) {
-        const wordCount = chunk.split(/\s+/).length;
-        displayTime = wordCount * MS_PER_WORD;
-      } else {
-        displayTime = chunk.length * MS_PER_CJK_CHAR;
-      }
-      
-      if (timings.length > 1) {
-        const totalChars = timings.reduce((sum, t) => sum + t.chunk.length, 0);
-        const ratio = chunk.length / totalChars;
-        const totalDuration = hasSpaces 
-          ? timings.reduce((sum, t) => sum + t.chunk.split(/\s+/).length * MS_PER_WORD, 0)
-          : totalChars * MS_PER_CJK_CHAR;
-        displayTime = Math.max(300, totalDuration * ratio);
-      }
-      
-      displayTime = Math.min(3000, Math.max(300, displayTime));
-      
-      subtitleTimerRef.current = setTimeout(processChunks, displayTime);
-      chunkIndex++;
-    };
-    
-    showNextChunkRef.current = processChunks;
-    processChunks();
-  }, []);
-
+  // Handle WebSocket events
   const handleServerEvent = useCallback((event) => {
     switch (event.type) {
       case 'input_audio_buffer.speech_started':
         updateStatus('listening', 'Listening...');
         break;
+        
       case 'conversation.item.input_audio_transcription.completed':
         if (event.transcript?.trim()) {
           const text = event.transcript.trim();
-          const hallucinations = [
-            // Korean hallucinations
-            '구독과 좋아요 부탁드립니다',
-            '좋아요와 구독 부탁드립니다',
-            '오늘도 시청해주셔서 감사합니다',
-            '오늘도 시청해 주셔서 감사합니다',
-            '시청해주셔서 감사합니다',
-            '시청해 주셔서 감사합니다',
-            '감사합니다',
-            'MBC 뉴스',
-            'KBS 뉴스',
-            'SBS 뉴스',
-            '이덕영입니다',
-            '입니다',
-            // English hallucinations
-            'Thank you for watching',
-            'Thanks for watching',
-            'Thank you',
-            'Adjust the compressor',
-            'Please subscribe',
-            'Like and subscribe',
-            // Symbols and markers
-            '....', '...', '..', '♪', '[음악]', '[박수]', '[웃음]',
-            '[Music]', '[Applause]', '[Laughter]', '[BLANK_AUDIO]',
-            '(upbeat music)', '(dramatic music)', '(sighs)',
-          ];
-          const isHallucination = hallucinations.some(h =>
-            text === h || text.includes(h) || text.startsWith('♪') || text.startsWith('[')
-          ) || text.length < 4;
-          if (!isHallucination) {
+          if (!isHallucination(text)) {
             setOriginalText(prev => [...prev, text]);
             pendingTranscriptionsRef.current.push(text);
-            if (pendingTranscriptionsRef.current.length >= 1) requestTranslation();
+            if (pendingTranscriptionsRef.current.length >= 1) {
+              websocket.requestResponse();
+              pendingTranscriptionsRef.current = [];
+            }
           }
         }
         break;
+        
       case 'response.text.delta':
       case 'response.audio_transcript.delta':
         if (event.delta) {
@@ -540,6 +117,7 @@ export default function App() {
           setCurrentTranslation(prev => prev + event.delta);
         }
         break;
+        
       case 'response.text.done':
       case 'response.audio_transcript.done':
         if (currentTranslationRef.current) {
@@ -550,212 +128,93 @@ export default function App() {
         }
         updateStatus('connected', 'Connected');
         break;
+        
       case 'response.audio.delta':
         if (event.delta && isVoiceModeRef.current) {
-          playRealtimeAudioChunk(event.delta);
+          realtimeAudio.playAudioChunk(event.delta);
           
-          if (isSubtitleModeRef.current && pendingSubtitleStartRef.current && subtitleQueueRef.current.length > 0) {
-            pendingSubtitleStartRef.current = false;
-            startSyncedSubtitles();
+          if (!isSpeakingTTS) {
+            setIsSpeakingTTS(true);
+          }
+          
+          // Start subtitle sync if pending
+          if (isSubtitleModeRef.current && subtitle.isPendingStart() && subtitle.hasQueue()) {
+            subtitle.setPendingStart(false);
+            subtitle.startProcessing();
           }
         }
         break;
-      case 'response.audio.done':
-        // Audio streaming complete
-        currentAudioDurationRef.current = pendingAudioDurationRef.current;
-        pendingAudioDurationRef.current = 0;
         
+      case 'response.audio.done':
+        realtimeAudio.onAudioDone();
         setTimeout(() => {
-          isPlayingRealtimeAudioRef.current = false;
           setIsSpeakingTTS(false);
         }, 500);
         break;
+        
       case 'response.done':
         updateStatus('connected', 'Connected');
         break;
+        
       case 'error':
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, requestTranslation, playRealtimeAudioChunk, startSyncedSubtitles]);
+  }, [updateStatus, realtimeAudio, subtitle, isSpeakingTTS]);
 
-  const visualize = useCallback(() => {
-    if (!analyserRef.current || !isListeningRef.current) return;
-    const bufferLength = analyserRef.current.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    analyserRef.current.getByteTimeDomainData(dataArray);
+  // WebSocket connection
+  const websocket = useWebSocket({
+    langA,
+    langB,
+    direction,
+    voiceType,
+    customInstruction,
+    isVoiceMode: isVoiceModeRef.current,
+    onStatusChange: updateStatus,
+    onServerEvent: handleServerEvent,
+  });
 
-    let max = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const amplitude = Math.abs(dataArray[i] - 128);
-      if (amplitude > max) max = amplitude;
-    }
-    const level = max / 128;
-    setAudioLevel(level);
+  // Audio capture
+  const audioCapture = useAudioCapture({
+    selectedMic,
+    onAudioData: (base64Audio) => websocket.sendAudio(base64Audio),
+    onCommit: () => websocket.commitAudio(),
+    onError: (msg) => updateStatus('error', msg),
+  });
 
-    const now = Date.now();
-    if (level > SILENCE_THRESHOLD) {
-      if (!isSpeakingRef.current) {
-        isSpeakingRef.current = true;
-        speechStartRef.current = now;
-      }
-      silenceStartRef.current = null;
-    } else if (isSpeakingRef.current) {
-      if (!silenceStartRef.current) {
-        silenceStartRef.current = now;
-      } else if (now - silenceStartRef.current > SILENCE_DURATION_MS) {
-        const speechDuration = silenceStartRef.current - speechStartRef.current;
-        isSpeakingRef.current = false;
-        silenceStartRef.current = null;
-        speechStartRef.current = null;
-        if (speechDuration >= MIN_SPEECH_DURATION_MS) commitAudio();
-      }
-    }
-    animationIdRef.current = requestAnimationFrame(visualize);
-  }, [commitAudio]);
-
-  const connectWebSocket = useCallback(() => {
-    return new Promise((resolve, reject) => {
-      const key = apiKey || envApiKey;
-      if (!key) {
-        updateStatus('error', 'API Key missing');
-        reject(new Error('API Key not found'));
-        return;
-      }
-      const ws = new WebSocket(
-        'wss://api.openai.com/v1/realtime?model=gpt-realtime',
-        ['realtime', `openai-insecure-api-key.${key}`, 'openai-beta.realtime-v1']
-      );
-      ws.onopen = () => {
-        updateStatus('connected', 'Connected');
-        const baseRules = `
-CRITICAL RULES:
-- You are ONLY a translator. You are NOT an assistant.
-- Output ONLY the direct translation of the input speech.
-- NEVER greet, introduce yourself, or say "Hello".
-- NEVER ask questions or offer help.
-- NEVER add comments, explanations, or any extra text.
-- If the input is unclear or empty, output NOTHING (stay silent).
-- Do NOT respond to the content - just translate it literally.`;
-
-        let instructions;
-        if (direction === 'a-to-b') {
-          instructions = `Translate ${languageNames[langA]} speech to ${languageNames[langB]}. ${baseRules}`;
-        } else if (direction === 'b-to-a') {
-          instructions = `Translate ${languageNames[langB]} speech to ${languageNames[langA]}. ${baseRules}`;
-        } else {
-          instructions = `Bidirectional translator: ${languageNames[langA]} ↔ ${languageNames[langB]}. Detect input language and translate to the other. ${baseRules}`;
-        }
-        if (customInstruction) {
-          instructions += `\n\nAdditional context: ${customInstruction}`;
-        }
-        const transcriptionConfig = { model: 'whisper-1' };
-        if (direction === 'a-to-b') {
-          transcriptionConfig.language = langA;
-        } else if (direction === 'b-to-a') {
-          transcriptionConfig.language = langB;
-        }
-
-        // Map TTS voices to Realtime API voices
-        const realtimeVoiceMap = {
-          'alloy': 'alloy',
-          'echo': 'echo',
-          'fable': 'sage',    // British-ish
-          'onyx': 'ash',      // Deep male
-          'nova': 'coral',    // Female
-          'shimmer': 'shimmer'
-        };
-
-        const sessionConfig = {
-          modalities: isVoiceModeRef.current ? ['text', 'audio'] : ['text'],
-          instructions,
-          input_audio_format: 'pcm16',
-          input_audio_transcription: transcriptionConfig,
-          turn_detection: null
-        };
-
-        // Add voice config if voice mode is enabled
-        if (isVoiceModeRef.current) {
-          sessionConfig.voice = realtimeVoiceMap[voiceType] || 'alloy';
-          sessionConfig.output_audio_format = 'pcm16';
-        }
-
-        ws.send(JSON.stringify({
-          type: 'session.update',
-          session: sessionConfig
-        }));
-        resolve(true);
-      };
-      ws.onmessage = (e) => handleServerEvent(JSON.parse(e.data));
-      ws.onerror = () => { updateStatus('error', 'Connection error'); reject(); };
-      ws.onclose = () => { if (isListening) updateStatus('error', 'Disconnected'); };
-      wsRef.current = ws;
-    });
-  }, [langA, langB, apiKey, envApiKey, customInstruction, direction, voiceType, updateStatus, handleServerEvent, isListening]);
-
-  const startAudioCapture = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { deviceId: selectedMic ? { exact: selectedMic } : undefined, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-      });
-      mediaStreamRef.current = stream;
-      audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-      await audioContextRef.current.audioWorklet.addModule('audio-processor.js');
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-      source.connect(analyserRef.current);
-      const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
-      worklet.port.onmessage = (event) => {
-        if (event.data.type === 'audio' && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(event.data.buffer) }));
-        }
-      };
-      source.connect(worklet);
-      audioWorkletNodeRef.current = worklet;
-      return true;
-    } catch {
-      updateStatus('error', 'Mic access denied');
-      return false;
-    }
-  }, [selectedMic, updateStatus]);
-
+  // Start listening
   const startListening = async () => {
     updateStatus('connecting', 'Connecting...');
     try {
-      await connectWebSocket();
-      const audioStarted = await startAudioCapture();
-      if (!audioStarted) { stopListening(); return; }
+      const key = apiKey || envApiKey;
+      await websocket.connect(key);
+      const audioStarted = await audioCapture.startCapture();
+      if (!audioStarted) {
+        stopListening();
+        return;
+      }
       isListeningRef.current = true;
       setIsListening(true);
+      audioCapture.startVisualization(setAudioLevel);
       updateStatus('connected', 'Speak now');
-    } catch { stopListening(); }
+    } catch {
+      stopListening();
+    }
   };
 
+  // Stop listening
   const stopListening = () => {
     isListeningRef.current = false;
     setIsListening(false);
     setAudioLevel(0);
-    isSpeakingRef.current = false;
-    silenceStartRef.current = null;
-    speechStartRef.current = null;
     pendingTranscriptionsRef.current = [];
-    if (animationIdRef.current) { cancelAnimationFrame(animationIdRef.current); animationIdRef.current = null; }
-    audioWorkletNodeRef.current?.disconnect();
-    analyserRef.current?.disconnect();
-    audioContextRef.current?.close();
-    mediaStreamRef.current?.getTracks().forEach(t => t.stop());
-    wsRef.current?.close();
-    audioWorkletNodeRef.current = null;
-    analyserRef.current = null;
-    audioContextRef.current = null;
-    mediaStreamRef.current = null;
-    wsRef.current = null;
-    // Reset realtime audio timing (let current audio finish naturally)
-    nextPlayTimeRef.current = 0;
+    audioCapture.stopCapture();
+    websocket.disconnect();
+    realtimeAudio.resetTiming();
     updateStatus('ready', 'Ready');
   };
 
+  // Clear transcripts
   const clearTranscripts = () => {
     setOriginalText([]);
     setTranslatedText([]);
@@ -763,31 +222,17 @@ CRITICAL RULES:
     currentTranslationRef.current = '';
   };
 
-  const openSettings = () => {
-    window.electronAPI?.openSettings?.();
-  };
-
+  // UI Handlers
+  const openSettings = () => window.electronAPI?.openSettings?.();
+  
   const increaseFontSize = () => {
     if (fontSize < 5) setFontSize(fontSize + 1);
   };
-
+  
   const decreaseFontSize = () => {
     if (fontSize > 0) setFontSize(fontSize - 1);
   };
-
-  const getFontSizeClasses = () => {
-    const sizes = {
-      current: ['text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl', 'text-7xl'],
-      previous: ['text-xl', 'text-2xl', 'text-3xl', 'text-4xl', 'text-5xl', 'text-6xl'],
-      cursor: ['h-6', 'h-8', 'h-10', 'h-12', 'h-14', 'h-16']
-    };
-    return {
-      current: sizes.current[fontSize],
-      previous: sizes.previous[fontSize],
-      cursor: sizes.cursor[fontSize]
-    };
-  };
-
+  
   const toggleTextDirection = () => {
     setTextDirection(prev => prev === 'down' ? 'up' : 'down');
   };
@@ -807,568 +252,143 @@ CRITICAL RULES:
     await window.electronAPI?.updateSubtitlePosition?.(newPosition);
   };
 
-  // Keep current text centered by scrolling
-  useEffect(() => {
-    if (scrollRef.current) {
-      if (textDirection === 'down') {
-        // Scroll to bottom for top-to-bottom flow
-        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-      } else {
-        // Scroll to top for bottom-to-top flow
-        scrollRef.current.scrollTop = 0;
-      }
-    }
-  }, [translatedText, currentTranslation, textDirection]);
-
-  useEffect(() => {
-    if (isListening && analyserRef.current) {
-      animationIdRef.current = requestAnimationFrame(visualize);
-    }
-    return () => { if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current); };
-  }, [isListening, visualize]);
-
-  // Calculate max characters per line based on container width and font size
-  useEffect(() => {
-    if (!isSubtitleMode || !subtitleContainerRef.current) return;
-
-    const calculateMaxChars = () => {
-      const container = subtitleContainerRef.current;
-      if (!container) return;
-
-      const containerWidth = container.clientWidth - 64; // px-8 = 32px * 2
-      const containerHeight = container.clientHeight;
-
-      // Font size is clamp(24px, 35vh, 120px)
-      const fontSize = Math.min(120, Math.max(24, containerHeight * 0.35));
-
-      // Approximate character width (varies by language, use conservative estimate)
-      // For mixed content, assume average ~0.6em per character
-      const avgCharWidth = fontSize * 0.6;
-      const maxChars = Math.floor(containerWidth / avgCharWidth);
-
-      setMaxCharsPerLine(Math.max(10, maxChars));
-    };
-
-    calculateMaxChars();
-
-    const resizeObserver = new ResizeObserver(calculateMaxChars);
-    resizeObserver.observe(subtitleContainerRef.current);
-
-    return () => resizeObserver.disconnect();
-  }, [isSubtitleMode]);
-
-  const splitTextIntoChunksSync = (text, maxChars) => {
-    if (!text || text.length <= maxChars) return [text];
-
-    const chunks = [];
-    const hasSpaces = /\s/.test(text);
-    
-    if (hasSpaces) {
-      const words = text.split(/\s+/);
-      let current = '';
-      
-      for (const word of words) {
-        const testLine = current ? `${current} ${word}` : word;
-        
-        if (testLine.length <= maxChars) {
-          current = testLine;
-        } else {
-          if (current) chunks.push(current);
-          
-          if (word.length > maxChars) {
-            for (let i = 0; i < word.length; i += maxChars) {
-              chunks.push(word.slice(i, i + maxChars));
-            }
-            current = '';
-          } else {
-            current = word;
-          }
-        }
-      }
-      
-      if (current) chunks.push(current);
-    } else {
-      // CJK languages: split at punctuation, then by character count
-      const breakPoints = /([。！？，、；：])/g;
-      const parts = text.split(breakPoints).filter(p => p);
-      
-      let current = '';
-      for (const part of parts) {
-        if ((current + part).length <= maxChars) {
-          current += part;
-        } else {
-          if (current) chunks.push(current);
-          
-          if (part.length > maxChars) {
-            for (let i = 0; i < part.length; i += maxChars) {
-              const slice = part.slice(i, i + maxChars);
-              if (i + maxChars < part.length) {
-                chunks.push(slice);
-              } else {
-                current = slice;
-              }
-            }
-          } else {
-            current = part;
-          }
-        }
-      }
-      
-      if (current) chunks.push(current);
-    }
-    
-    return chunks.filter(c => c.trim());
+  const toggleVoiceMode = () => setIsVoiceMode(!isVoiceMode);
+  
+  const toggleVoiceOnlyMode = () => {
+    const newValue = !voiceOnlyMode;
+    setVoiceOnlyMode(newValue);
+    localStorage.setItem('translatorVoiceOnly', newValue.toString());
   };
 
-  const splitTextIntoChunks = useCallback((text, maxChars) => {
-    return splitTextIntoChunksSync(text, maxChars);
-  }, []);
-
-  // Process new translations into subtitle queue
+  // Effects
   useEffect(() => {
-    if (!isSubtitleMode) return;
-    if (currentTranslation) return;
-
-    const latestIndex = translatedText.length - 1;
-    if (latestIndex < 0 || latestIndex <= lastProcessedIndexRef.current) return;
-
-    const newText = translatedText[latestIndex];
-    lastProcessedIndexRef.current = latestIndex;
-
-    const chunks = splitTextIntoChunks(newText, maxCharsPerLine);
+    const handleSettingsClosed = () => {
+      setApiKey(localStorage.getItem('translatorApiKey') || '');
+      setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
+      selectMic(localStorage.getItem('translatorMic') || '');
+      setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
+      setDirection(localStorage.getItem('translatorDirection') || 'auto');
+    };
+    window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
     
-    const totalChars = chunks.reduce((sum, c) => sum + c.length, 0);
-    subtitleChunkTimingsRef.current = chunks.map(chunk => ({
-      chunk,
-      ratio: chunk.length / totalChars
-    }));
+    // Check if already in subtitle mode
+    window.electronAPI?.getSubtitleMode?.().then(mode => {
+      setIsSubtitleMode(mode || false);
+    });
+  }, [selectMic]);
 
-    subtitleQueueRef.current = [...subtitleQueueRef.current, ...chunks];
-    setSubtitleQueue([...subtitleQueueRef.current]);
-
-    if (!isProcessingQueueRef.current) {
-      if (isVoiceModeRef.current) {
-        pendingSubtitleStartRef.current = true;
-        if (isPlayingRealtimeAudioRef.current) {
-          startSyncedSubtitles();
-          pendingSubtitleStartRef.current = false;
-        }
-      } else {
-        startSyncedSubtitles();
-      }
-    }
-  }, [isSubtitleMode, translatedText, currentTranslation, splitTextIntoChunks, maxCharsPerLine, startSyncedSubtitles]);
-
-  // Clear subtitle queue when exiting subtitle mode
-  useEffect(() => {
-    if (!isSubtitleMode) {
-      subtitleQueueRef.current = [];
-      setSubtitleQueue([]);
-      setCurrentSubtitle('');
-      lastProcessedIndexRef.current = -1;
-      isProcessingQueueRef.current = false;
-      if (subtitleTimerRef.current) {
-        clearTimeout(subtitleTimerRef.current);
-        subtitleTimerRef.current = null;
-      }
-    }
-  }, [isSubtitleMode]);
-
-  // Sync voice mode ref and stop audio when disabled
+  // Sync voice mode ref
   useEffect(() => {
     isVoiceModeRef.current = isVoiceMode;
-    if (!isVoiceMode) {
-      stopRealtimeAudio();
-    }
-  }, [isVoiceMode, stopRealtimeAudio]);
+    realtimeAudio.setEnabled(isVoiceMode);
+  }, [isVoiceMode, realtimeAudio]);
 
   // Sync subtitle mode ref
   useEffect(() => {
     isSubtitleModeRef.current = isSubtitleMode;
   }, [isSubtitleMode]);
 
-  // Subtitle Mode UI
-  const subtitleHoverTimeoutRef = useRef(null);
-  
-  const handleSubtitleMouseMove = () => {
-    setSubtitleHovered(true);
-    if (subtitleHoverTimeoutRef.current) {
-      clearTimeout(subtitleHoverTimeoutRef.current);
+  // Process translations into subtitle queue
+  useEffect(() => {
+    if (!isSubtitleMode) return;
+    if (currentTranslation) return;
+
+    const latestIndex = translatedText.length - 1;
+    if (latestIndex < 0 || latestIndex <= subtitle.getLastProcessedIndex()) return;
+
+    const newText = translatedText[latestIndex];
+    subtitle.setLastProcessedIndex(latestIndex);
+    subtitle.addTranslation(newText);
+
+    if (!subtitle.isProcessing()) {
+      if (isVoiceModeRef.current) {
+        subtitle.setPendingStart(true);
+        if (realtimeAudio.isPlaying()) {
+          subtitle.startProcessing();
+          subtitle.setPendingStart(false);
+        }
+      } else {
+        subtitle.startProcessing();
+      }
     }
-    subtitleHoverTimeoutRef.current = setTimeout(() => {
-      setSubtitleHovered(false);
-    }, 2000); // Hide after 2 seconds of no movement
-  };
-  
-  const handleSubtitleMouseLeave = () => {
-    if (subtitleHoverTimeoutRef.current) {
-      clearTimeout(subtitleHoverTimeoutRef.current);
-    }
-    setSubtitleHovered(false);
-  };
-  
+  }, [isSubtitleMode, translatedText, currentTranslation, subtitle, realtimeAudio]);
+
+  // Subtitle Mode Render
   if (isSubtitleMode) {
-    const displayText = currentSubtitle || (isListening ? 'Listening...' : 'Ready');
-    const isStreaming = !!currentTranslation;
-    const hasQueue = subtitleQueueRef.current.length > 0;
-
     return (
-      <div
-        ref={subtitleContainerRef}
-        className="h-full w-full bg-black/30 text-white relative drag-region"
-        onMouseMove={handleSubtitleMouseMove}
-        onMouseLeave={handleSubtitleMouseLeave}
-      >
-
-        {/* Translation text - centered, fades when hovered */}
-        <div className={`absolute inset-0 flex items-center justify-center px-8 pointer-events-none transition-opacity duration-200 ${
-          subtitleHovered ? 'opacity-30' : 'opacity-100'
-        }`}>
-          <p
-            className="font-bold text-center leading-tight text-white"
-            style={{
-              fontSize: 'clamp(24px, 35vh, 120px)',
-              textShadow: '0 2px 8px rgba(0,0,0,1), 0 0 30px rgba(0,0,0,0.8), 0 0 60px rgba(0,0,0,0.5)'
-            }}
-          >
-            {displayText}
-            {isStreaming && (
-              <span
-                className="inline-block w-[3px] bg-codex-live ml-1 animate-blink"
-                style={{ height: '0.8em' }}
-              />
-            )}
-          </p>
-        </div>
-
-        {/* Queue indicator */}
-        {hasQueue && !isStreaming && (
-          <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1">
-            {subtitleQueueRef.current.slice(0, 5).map((_, i) => (
-              <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/40" />
-            ))}
-          </div>
-        )}
-        
-        {/* Controls - center, only visible on hover */}
-        <div className={`absolute inset-0 flex items-center justify-center no-drag z-10 transition-opacity duration-200 ${
-          subtitleHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}>
-          <div className="flex items-center gap-3 px-5 py-2.5 bg-black/70 backdrop-blur-sm rounded-full">
-            {/* Language indicator */}
-            <div className="flex items-center gap-1.5 text-white/80 text-sm">
-              <span>{languageNames[langA]}</span>
-              <ArrowLeftRight size={14} className="text-white/50" />
-              <span>{languageNames[langB]}</span>
-            </div>
-            <div className="w-px h-6 bg-white/30" />
-            <button
-              onClick={toggleSubtitleMode}
-              className="p-2 hover:bg-white/20 rounded-full transition-colors"
-              title="Exit subtitle mode"
-            >
-              <Maximize2 size={18} className="text-white/90" />
-            </button>
-            <button
-              onClick={toggleSubtitlePosition}
-              className="p-2 hover:bg-white/20 rounded-full transition-colors"
-              title={subtitlePosition === 'bottom' ? 'Move to top' : 'Move to bottom'}
-            >
-              {subtitlePosition === 'bottom' ? <ArrowUp size={18} className="text-white/90" /> : <ArrowDown size={18} className="text-white/90" />}
-            </button>
-            <div className="w-px h-6 bg-white/30" />
-            {!isListening ? (
-              <button
-                onClick={startListening}
-                className="p-2 hover:bg-white/20 rounded-full transition-colors"
-                title="Start"
-              >
-                <Play size={20} className="text-white" fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                onClick={stopListening}
-                className="p-2 hover:bg-white/20 rounded-full transition-colors"
-                title="Stop"
-              >
-                <Square size={16} className="text-codex-error" fill="currentColor" />
-              </button>
-            )}
-            {isListening && (
-              <>
-                <div className="w-px h-6 bg-white/30" />
-                <AudioWave isActive={audioLevel > 0.05} audioLevel={audioLevel} />
-              </>
-            )}
-            <Circle
-              size={8}
-              className={`ml-1 transition-colors ${
-                status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
-                status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
-                status === 'error' ? 'fill-red-400 text-red-400' :
-                'fill-codex-muted text-codex-muted'
-              }`}
-            />
-          </div>
-        </div>
-      </div>
+      <SubtitleMode
+        currentSubtitle={subtitle.currentSubtitle}
+        currentTranslation={currentTranslation}
+        hasQueue={subtitle.hasQueue()}
+        queueLength={subtitle.queue.length}
+        isListening={isListening}
+        audioLevel={audioLevel}
+        status={status}
+        langA={langA}
+        langB={langB}
+        subtitlePosition={subtitlePosition}
+        onToggleSubtitleMode={toggleSubtitleMode}
+        onToggleSubtitlePosition={toggleSubtitlePosition}
+        onStart={startListening}
+        onStop={stopListening}
+        onMaxCharsCalculated={setMaxCharsPerLine}
+      />
     );
   }
 
+  // Normal Mode Render
   return (
     <div className="h-full bg-[#0a0a0a] text-codex-text flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 border-b border-codex-border bg-codex-bg drag-region">
-        <div className="flex items-center no-drag">
-          <WindowControls />
-          <span className="text-sm font-medium text-codex-text">Translator</span>
-        </div>
-        <div className="flex items-center gap-3 no-drag">
-          {isListening && (
-            <div className="flex items-center gap-2 px-2.5 py-1 bg-codex-live/10 border border-codex-live/20 rounded-full">
-              <AudioWave isActive={audioLevel > 0.05} audioLevel={audioLevel} />
-              <span className="text-xs text-codex-live">Live</span>
-            </div>
-          )}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full transition-colors ${
-            status === 'connected' || status === 'listening' ? 'bg-emerald-500/15' :
-            status === 'connecting' ? 'bg-amber-500/15' :
-            status === 'error' ? 'bg-red-500/15' : ''
-          }`}>
-            <Circle
-              size={6}
-              className={`transition-colors ${
-                status === 'connected' || status === 'listening' ? 'fill-emerald-400 text-emerald-400' :
-                status === 'connecting' ? 'fill-amber-400 text-amber-400 animate-pulse' :
-                status === 'error' ? 'fill-red-400 text-red-400' :
-                'fill-codex-muted text-codex-muted'
-              }`}
-            />
-            <span className={`text-xs transition-colors ${
-              status === 'connected' || status === 'listening' ? 'text-emerald-400' :
-              status === 'connecting' ? 'text-amber-400' :
-              status === 'error' ? 'text-red-400' :
-              'text-codex-text-secondary'
-            }`}>{statusText}</span>
-          </div>
-          <button
-            onClick={openSettings}
-            disabled={isListening}
-            className={`p-1.5 rounded-md transition-colors ${
-              isListening ? 'opacity-40 cursor-not-allowed' : 'hover:bg-white/5'
-            }`}
-          >
-            <Settings size={16} className="text-codex-text-secondary" />
-          </button>
-        </div>
-      </header>
+      <Header
+        isListening={isListening}
+        audioLevel={audioLevel}
+        status={status}
+        statusText={statusText}
+        onSettingsClick={openSettings}
+      />
 
-      {/* Language Bar */}
-      <div className="flex items-center justify-center gap-3 px-4 py-3 border-b border-codex-border-subtle">
-        <LanguageSelector value={langA} onChange={setLangA} disabled={isListening} />
-        <DirectionSelector value={direction} onChange={setDirection} disabled={isListening} langA={langA} langB={langB} />
-        <LanguageSelector value={langB} onChange={setLangB} disabled={isListening} />
-      </div>
+      <LanguageBar
+        langA={langA}
+        langB={langB}
+        direction={direction}
+        onLangAChange={setLangA}
+        onLangBChange={setLangB}
+        onDirectionChange={setDirection}
+        disabled={isListening}
+      />
 
-      {/* Main Content */}
       <main className="flex-1 flex flex-col min-h-0 p-4">
-        {/* Translation Display - Teleprompter Style */}
-        <div className="flex-1 flex flex-col min-h-0 mb-4">
-          <div ref={scrollRef} className="flex-1 bg-codex-surface border border-codex-border rounded-xl p-8 overflow-y-auto flex flex-col">
-            {isVoiceMode && voiceOnlyMode ? (
-              <div className="flex-1 flex flex-col items-center justify-center gap-4">
-                <div className={`w-20 h-20 rounded-full flex items-center justify-center ${
-                  isSpeakingTTS ? 'bg-codex-live/20 animate-pulse' : 'bg-codex-elevated'
-                }`}>
-                  <Volume2 size={40} className={isSpeakingTTS ? 'text-codex-live' : 'text-codex-muted'} />
-                </div>
-                <p className="text-codex-muted text-lg">
-                  {isSpeakingTTS ? 'Speaking...' : isListening ? 'Listening...' : 'Voice mode active'}
-                </p>
-              </div>
-            ) : translatedText.length === 0 && !currentTranslation ? (
-              <div className="flex-1 flex items-center justify-center">
-                <p className="text-codex-muted text-base">
-                  {isListening ? 'Listening...' : 'Press Start to begin'}
-                </p>
-              </div>
-            ) : textDirection === 'down' ? (
-              <>
-                {/* Top-to-bottom flow: Spacer at top */}
-                <div className="flex-1 min-h-0" />
-                
-                <div className="space-y-6 text-center">
-                  {/* All previous translations - scrollable */}
-                  {translatedText.map((text, i, arr) => {
-                    const isLast = i === arr.length - 1 && !currentTranslation;
-                    const opacity = isLast ? 1 : 0.4 + (i / arr.length) * 0.4;
-                    const fontClasses = getFontSizeClasses();
-                    return (
-                      <p
-                        key={i}
-                        className={`leading-relaxed transition-all duration-300 ${
-                          isLast ? `${fontClasses.current} font-semibold text-codex-text` : `${fontClasses.previous} text-codex-text`
-                        }`}
-                        style={{ opacity }}
-                      >
-                        {text}
-                      </p>
-                    );
-                  })}
-                  {/* Current streaming translation */}
-                  {currentTranslation && (
-                    <p className={`${getFontSizeClasses().current} font-semibold leading-relaxed text-codex-text`}>
-                      {currentTranslation}
-                      <span className={`inline-block w-[4px] ${getFontSizeClasses().cursor} bg-codex-live ml-1.5 animate-blink`} />
-                    </p>
-                  )}
-                </div>
-                
-                {/* Spacer to center content */}
-                <div className="flex-1 min-h-0" />
-              </>
-            ) : (
-              <>
-                {/* Bottom-to-top flow: Spacer at bottom */}
-                <div className="flex-1 min-h-0" />
-                
-                <div className="space-y-6 text-center">
-                  {/* Current streaming translation at top */}
-                  {currentTranslation && (
-                    <p className={`${getFontSizeClasses().current} font-semibold leading-relaxed text-codex-text`}>
-                      {currentTranslation}
-                      <span className={`inline-block w-[4px] ${getFontSizeClasses().cursor} bg-codex-live ml-1.5 animate-blink`} />
-                    </p>
-                  )}
-                  {/* All previous translations in reverse order */}
-                  {[...translatedText].reverse().map((text, i, arr) => {
-                    const isFirst = i === 0 && !currentTranslation;
-                    const opacity = isFirst ? 1 : 0.4 + ((arr.length - i) / arr.length) * 0.4;
-                    const fontClasses = getFontSizeClasses();
-                    return (
-                      <p
-                        key={translatedText.length - 1 - i}
-                        className={`leading-relaxed transition-all duration-300 ${
-                          isFirst ? `${fontClasses.current} font-semibold text-codex-text` : `${fontClasses.previous} text-codex-text`
-                        }`}
-                        style={{ opacity }}
-                      >
-                        {text}
-                      </p>
-                    );
-                  })}
-                </div>
-                
-                {/* Spacer at bottom */}
-                <div className="flex-1 min-h-0" />
-              </>
-            )}
-          </div>
+        <TranslationDisplay
+          translatedText={translatedText}
+          currentTranslation={currentTranslation}
+          originalText={originalText}
+          fontSize={fontSize}
+          textDirection={textDirection}
+          isListening={isListening}
+          isVoiceMode={isVoiceMode}
+          voiceOnlyMode={voiceOnlyMode}
+          isSpeakingTTS={isSpeakingTTS}
+        />
 
-          {/* Original Text - Subtitle style */}
-          <div className="mt-4 text-center">
-            <p className="text-base text-codex-text-secondary/80 italic">
-              {originalText.length > 0 ? `"${originalText.slice(-1)[0]}"` : ''}
-            </p>
-          </div>
-        </div>
-
-        {/* Controls */}
-        <div className="flex items-center gap-2">
-          {!isListening ? (
-            <button
-              onClick={startListening}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-white text-black font-medium rounded-lg transition-all hover:bg-white/90 active:scale-[0.98]"
-            >
-              <Play size={16} fill="currentColor" />
-              <span>Start</span>
-            </button>
-          ) : (
-            <button
-              onClick={stopListening}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-codex-error/90 text-white font-medium rounded-lg transition-all hover:bg-codex-error active:scale-[0.98]"
-            >
-              <Square size={14} fill="currentColor" />
-              <span>Stop</span>
-            </button>
-          )}
-          <div className="flex items-center gap-1 bg-codex-surface border border-codex-border rounded-lg">
-            <button
-              onClick={decreaseFontSize}
-              disabled={fontSize === 0}
-              className={`p-2.5 text-codex-muted hover:text-codex-text transition-colors rounded-l-lg ${
-                fontSize === 0 ? 'opacity-40 cursor-not-allowed' : ''
-              }`}
-              title="Decrease font size"
-            >
-              <Type size={14} />
-            </button>
-            <div className="w-px h-4 bg-codex-border" />
-            <button
-              onClick={increaseFontSize}
-              disabled={fontSize === 5}
-              className={`p-2.5 text-codex-muted hover:text-codex-text transition-colors rounded-r-lg ${
-                fontSize === 5 ? 'opacity-40 cursor-not-allowed' : ''
-              }`}
-              title="Increase font size"
-            >
-              <Type size={18} />
-            </button>
-          </div>
-          <button
-            onClick={toggleTextDirection}
-            className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
-            title={textDirection === 'down' ? 'Top to bottom' : 'Bottom to top'}
-          >
-            {textDirection === 'down' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
-          </button>
-          <button
-            onClick={toggleSubtitleMode}
-            className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
-            title="Subtitle mode"
-          >
-            <PanelTop size={16} />
-          </button>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setIsVoiceMode(!isVoiceMode)}
-              className={`p-2.5 border rounded-lg transition-colors ${
-                isVoiceMode
-                  ? 'bg-codex-live/20 border-codex-live text-codex-live'
-                  : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
-              }`}
-              title={isVoiceMode ? 'Voice mode ON' : 'Voice mode OFF'}
-            >
-              {isVoiceMode ? <Volume2 size={16} /> : <VolumeX size={16} />}
-            </button>
-            {isVoiceMode && (
-              <>
-                <VoiceSelector value={voiceType} onChange={setVoiceType} disabled={isSpeakingTTS} />
-                <button
-                  onClick={() => {
-                    const newValue = !voiceOnlyMode;
-                    setVoiceOnlyMode(newValue);
-                    localStorage.setItem('translatorVoiceOnly', newValue.toString());
-                  }}
-                  className={`p-2 border rounded-lg transition-colors ${
-                    voiceOnlyMode
-                      ? 'bg-codex-live/20 border-codex-live text-codex-live'
-                      : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
-                  }`}
-                  title={voiceOnlyMode ? 'Text hidden (voice only)' : 'Text visible'}
-                >
-                  {voiceOnlyMode ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
-              </>
-            )}
-          </div>
-          <button
-            onClick={clearTranscripts}
-            className="p-2.5 bg-codex-surface border border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated rounded-lg transition-colors"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
+        <ControlBar
+          isListening={isListening}
+          onStart={startListening}
+          onStop={stopListening}
+          fontSize={fontSize}
+          onFontSizeIncrease={increaseFontSize}
+          onFontSizeDecrease={decreaseFontSize}
+          textDirection={textDirection}
+          onToggleDirection={toggleTextDirection}
+          onToggleSubtitleMode={toggleSubtitleMode}
+          isVoiceMode={isVoiceMode}
+          onToggleVoiceMode={toggleVoiceMode}
+          voiceType={voiceType}
+          onVoiceTypeChange={setVoiceType}
+          isSpeakingTTS={isSpeakingTTS}
+          voiceOnlyMode={voiceOnlyMode}
+          onToggleVoiceOnlyMode={toggleVoiceOnlyMode}
+          onClear={clearTranscripts}
+        />
       </main>
     </div>
   );
