@@ -12,6 +12,11 @@ class AudioProcessor extends AudioWorkletProcessor {
     if (input && input.length > 0) {
       const inputChannel = input[0];
 
+      // Guard against empty input channel
+      if (!inputChannel || inputChannel.length === 0) {
+        return true;
+      }
+
       // Calculate audio level for visualization (every frame)
       let sum = 0;
       for (let i = 0; i < inputChannel.length; i++) {
@@ -31,8 +36,7 @@ class AudioProcessor extends AudioWorkletProcessor {
           const pcm16 = this.float32ToPcm16(this.buffer);
           this.port.postMessage({ type: 'audio', buffer: pcm16.buffer }, [pcm16.buffer]);
 
-          // Reset buffer
-          this.buffer = new Float32Array(this.bufferSize);
+          // Reset buffer index (reuse existing buffer to avoid GC pressure)
           this.bufferIndex = 0;
         }
       }
