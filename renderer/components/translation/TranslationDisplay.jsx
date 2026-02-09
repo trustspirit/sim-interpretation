@@ -12,6 +12,7 @@ export default function TranslationDisplay({
   isVoiceMode,
   voiceOnlyMode,
   isSpeakingTTS,
+  showOriginalText = true,
 }) {
   const scrollRef = useRef(null);
   const fontClasses = getFontSizeClasses(fontSize);
@@ -57,32 +58,32 @@ export default function TranslationDisplay({
             {isListening ? 'Listening...' : 'Press Start to begin'}
           </p>
         </div>
-        <OriginalTextDisplay text={originalText} />
+        {showOriginalText && <OriginalTextDisplay text={originalText} />}
       </div>
     );
   }
 
   return (
     <div className="flex-1 flex flex-col min-h-0 mb-4">
-      <div 
-        ref={scrollRef} 
+      <div
+        ref={scrollRef}
         className="flex-1 bg-codex-surface border border-codex-border rounded-xl p-8 overflow-y-auto flex flex-col"
       >
         {textDirection === 'down' ? (
-          <TopToBottomLayout 
+          <TopToBottomLayout
             translatedText={translatedText}
             currentTranslation={currentTranslation}
             fontClasses={fontClasses}
           />
         ) : (
-          <BottomToTopLayout 
+          <BottomToTopLayout
             translatedText={translatedText}
             currentTranslation={currentTranslation}
             fontClasses={fontClasses}
           />
         )}
       </div>
-      <OriginalTextDisplay text={originalText} />
+      {showOriginalText && <OriginalTextDisplay text={originalText} />}
     </div>
   );
 }

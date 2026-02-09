@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Mic, Key, Eye, EyeOff, X, ChevronDown, ChevronRight, Save, Check, Monitor } from 'lucide-react';
-import { MicSelector } from './components/selectors';
-import { useMicrophones } from './hooks';
+import { Mic, Key, Eye, EyeOff, X, ChevronDown, ChevronRight, Save, Check, Monitor, Volume2 } from 'lucide-react';
+import { MicSelector, AudioOutputSelector } from './components/selectors';
+import { useMicrophones, useAudioOutputs } from './hooks';
 
 // Section component for consistent styling
 function Section({ children, className = '' }) {
@@ -83,6 +83,7 @@ export default function Settings() {
   const [subtitlePosition, setSubtitlePosition] = useState('bottom');
 
   const { microphones, selectedMic, selectMic } = useMicrophones();
+  const { outputs, selectedOutput, selectOutput } = useAudioOutputs();
 
   useEffect(() => {
     setApiKey(localStorage.getItem('translatorApiKey') || '');
@@ -106,6 +107,10 @@ export default function Settings() {
 
   const handleMicChange = (deviceId) => {
     selectMic(deviceId);
+  };
+
+  const handleOutputChange = (deviceId) => {
+    selectOutput(deviceId);
   };
 
   const handleSubtitlePositionChange = (position) => {
@@ -151,11 +156,24 @@ export default function Settings() {
       <main className="flex-1 overflow-y-auto p-4 space-y-6">
         {/* Microphone Section */}
         <Section>
-          <SectionHeader icon={Mic} title="Microphone" />
+          <SectionHeader icon={Mic} title="Microphone (Input)" />
           <MicSelector
             value={selectedMic}
             onChange={handleMicChange}
             microphones={microphones}
+          />
+        </Section>
+
+        {/* Audio Output Section */}
+        <Section>
+          <SectionHeader icon={Volume2} title="Audio Output (TTS)" />
+          <p className="text-xs text-codex-muted mb-3">
+            Select where translated voice plays. Use BlackHole to route to Zoom.
+          </p>
+          <AudioOutputSelector
+            value={selectedOutput}
+            onChange={handleOutputChange}
+            outputs={outputs}
           />
         </Section>
 

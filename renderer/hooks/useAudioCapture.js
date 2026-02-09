@@ -1,9 +1,9 @@
 import { useRef, useCallback } from 'react';
 
-// Audio detection thresholds
-const SILENCE_THRESHOLD = 0.05;
-const SILENCE_DURATION_MS = 550;  // 550ms 침묵 시 commit
-const MIN_SPEECH_DURATION_MS = 300;
+// Audio detection thresholds (tuned for translation quality)
+const SILENCE_THRESHOLD = 0.04;      // Lower = more sensitive (detect quieter speech)
+const SILENCE_DURATION_MS = 600;     // Wait 600ms of silence before commit (complete sentences)
+const MIN_SPEECH_DURATION_MS = 400;  // Ignore speech shorter than 400ms (reduce noise triggers)
 
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
@@ -29,14 +29,21 @@ export default function useAudioCapture({
 
   const isActiveRef = useRef(false);
   const audioLevelRef = useRef(0);
+  const captureIdRef = useRef(0); // Track capture session to handle race conditions
 
   // Silence detection refs
   const isSpeakingRef = useRef(false);
   const silenceStartRef = useRef(null);
   const speechStartRef = useRef(null);
+  const lastSpeechEndRef = useRef(0); // Track when speech last ended (for hallucination detection)
+  const hasAudioToCommitRef = useRef(false); // Track if audio has been sent since last commit
 
   const startCapture = useCallback(async () => {
     try {
+      // Increment capture ID to invalidate any in-flight async operations
+      const currentCaptureId = ++captureIdRef.current;
+      isActiveRef.current = true;
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: selectedMic ? { exact: selectedMic } : undefined,
@@ -46,10 +53,23 @@ export default function useAudioCapture({
         }
       });
 
+      // Check if this capture session is still valid
+      if (currentCaptureId !== captureIdRef.current) {
+        stream.getTracks().forEach(t => t.stop());
+        return false;
+      }
+
       mediaStreamRef.current = stream;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
 
       await audioContextRef.current.audioWorklet.addModule('audio-processor.js');
+
+      // Check again after async operation
+      if (currentCaptureId !== captureIdRef.current) {
+        audioContextRef.current.close();
+        stream.getTracks().forEach(t => t.stop());
+        return false;
+      }
 
       const source = audioContextRef.current.createMediaStreamSource(stream);
       analyserRef.current = audioContextRef.current.createAnalyser();
@@ -58,15 +78,16 @@ export default function useAudioCapture({
 
       const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       worklet.port.onmessage = (event) => {
-        if (event.data.type === 'audio' && isActiveRef.current) {
+        // Check both isActive and captureId
+        if (event.data.type === 'audio' && isActiveRef.current && currentCaptureId === captureIdRef.current) {
           const base64Audio = arrayBufferToBase64(event.data.buffer);
+          hasAudioToCommitRef.current = true; // Mark that we have audio to commit
           onAudioData?.(base64Audio);
         }
       };
       source.connect(worklet);
       audioWorkletNodeRef.current = worklet;
 
-      isActiveRef.current = true;
       return true;
     } catch (error) {
       onError?.('Mic access denied');
@@ -80,10 +101,16 @@ export default function useAudioCapture({
     isSpeakingRef.current = false;
     silenceStartRef.current = null;
     speechStartRef.current = null;
+    hasAudioToCommitRef.current = false;
 
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);
       animationIdRef.current = null;
+    }
+
+    // Clean up AudioWorkletNode message handler to prevent memory leak
+    if (audioWorkletNodeRef.current?.port) {
+      audioWorkletNodeRef.current.port.onmessage = null;
     }
 
     audioWorkletNodeRef.current?.disconnect();
@@ -127,10 +154,12 @@ export default function useAudioCapture({
       } else if (now - silenceStartRef.current > SILENCE_DURATION_MS) {
         const speechDuration = silenceStartRef.current - speechStartRef.current;
         isSpeakingRef.current = false;
+        lastSpeechEndRef.current = now; // Track when speech ended
         silenceStartRef.current = null;
         speechStartRef.current = null;
-        if (speechDuration >= MIN_SPEECH_DURATION_MS) {
+        if (speechDuration >= MIN_SPEECH_DURATION_MS && hasAudioToCommitRef.current) {
           console.log(`[VAD] Silence detected after ${speechDuration}ms of speech, triggering commit`);
+          hasAudioToCommitRef.current = false; // Reset after commit
           onCommit?.();
         }
       }
@@ -152,5 +181,12 @@ export default function useAudioCapture({
     startVisualization,
     isActive: () => isActiveRef.current,
     getAudioLevel: () => audioLevelRef.current,
+    // For hallucination detection
+    isSpeaking: () => isSpeakingRef.current,
+    hadRecentSpeech: (thresholdMs = 3000) => {
+      if (isSpeakingRef.current) return true; // Currently speaking
+      if (lastSpeechEndRef.current === 0) return false; // Never spoke
+      return (Date.now() - lastSpeechEndRef.current) < thresholdMs;
+    },
   };
 }

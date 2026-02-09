@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useMemo } from 'react';
 
 // Base64 to ArrayBuffer
 const base64ToArrayBuffer = (base64) => {
@@ -22,23 +22,53 @@ const pcm16ToFloat32 = (pcm16Buffer) => {
 
 export default function useRealtimeAudio() {
   const outputAudioContextRef = useRef(null);
+  const mediaStreamDestRef = useRef(null);
+  const audioElementRef = useRef(null);
   const isPlayingRef = useRef(false);
   const nextPlayTimeRef = useRef(0);
   const isEnabledRef = useRef(false);
   const currentAudioDurationRef = useRef(0);
   const pendingAudioDurationRef = useRef(0);
+  const selectedOutputRef = useRef('');
 
-  const playAudioChunk = useCallback((base64Audio) => {
+  // Initialize audio context and routing
+  const initAudioContext = useCallback(async () => {
+    if (outputAudioContextRef.current) return;
+
+    const ctx = new AudioContext({ sampleRate: 24000 });
+    outputAudioContextRef.current = ctx;
+
+    // Create MediaStreamDestination for custom output routing
+    const dest = ctx.createMediaStreamDestination();
+    mediaStreamDestRef.current = dest;
+
+    // Create audio element and connect to the stream
+    const audioEl = new Audio();
+    audioEl.srcObject = dest.stream;
+    audioEl.autoplay = true;
+    audioElementRef.current = audioEl;
+
+    // Set output device if selected
+    if (selectedOutputRef.current && audioEl.setSinkId) {
+      try {
+        await audioEl.setSinkId(selectedOutputRef.current);
+      } catch (err) {
+        console.warn('Failed to set audio output device:', err);
+      }
+    }
+  }, []);
+
+  const playAudioChunk = useCallback(async (base64Audio) => {
     if (!isEnabledRef.current) return;
 
-    // Initialize output audio context if needed
+    // Initialize if needed
     if (!outputAudioContextRef.current) {
-      outputAudioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      await initAudioContext();
     }
 
     const ctx = outputAudioContextRef.current;
     if (ctx.state === 'suspended') {
-      ctx.resume();
+      await ctx.resume();
     }
 
     const pcmBuffer = base64ToArrayBuffer(base64Audio);
@@ -51,10 +81,10 @@ export default function useRealtimeAudio() {
     // Track total duration for subtitle sync
     pendingAudioDurationRef.current += audioBuffer.duration;
 
-    // Schedule playback
+    // Schedule playback - connect to MediaStreamDestination for custom output
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(ctx.destination);
+    source.connect(mediaStreamDestRef.current);
 
     const currentTime = ctx.currentTime;
     const startTime = Math.max(currentTime, nextPlayTimeRef.current);
@@ -64,15 +94,26 @@ export default function useRealtimeAudio() {
     if (!isPlayingRef.current) {
       isPlayingRef.current = true;
     }
-    
+
+    source.onended = () => {
+      if (ctx.currentTime >= nextPlayTimeRef.current) {
+        isPlayingRef.current = false;
+      }
+    };
+
     return true;
-  }, []);
+  }, [initAudioContext]);
 
   const stopAudio = useCallback(() => {
+    if (audioElementRef.current) {
+      audioElementRef.current.srcObject = null;
+      audioElementRef.current = null;
+    }
     if (outputAudioContextRef.current) {
       outputAudioContextRef.current.close();
       outputAudioContextRef.current = null;
     }
+    mediaStreamDestRef.current = null;
     isPlayingRef.current = false;
     nextPlayTimeRef.current = 0;
   }, []);
@@ -93,14 +134,30 @@ export default function useRealtimeAudio() {
     }
   }, [stopAudio]);
 
-  return {
+  // Set output device
+  const setOutputDevice = useCallback(async (deviceId) => {
+    selectedOutputRef.current = deviceId || '';
+
+    // Update existing audio element if it exists
+    if (audioElementRef.current && audioElementRef.current.setSinkId) {
+      try {
+        await audioElementRef.current.setSinkId(deviceId || '');
+        console.log('Audio output device set to:', deviceId || 'default');
+      } catch (err) {
+        console.warn('Failed to set audio output device:', err);
+      }
+    }
+  }, []);
+
+  return useMemo(() => ({
     playAudioChunk,
     stopAudio,
     onAudioDone,
     resetTiming,
     setEnabled,
+    setOutputDevice,
     isPlaying: () => isPlayingRef.current,
     isEnabled: () => isEnabledRef.current,
     getCurrentDuration: () => currentAudioDurationRef.current,
-  };
+  }), [playAudioChunk, stopAudio, onAudioDone, resetTiming, setEnabled, setOutputDevice]);
 }

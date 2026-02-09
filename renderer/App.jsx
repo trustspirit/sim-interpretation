@@ -14,7 +14,7 @@ import {
 } from './hooks';
 
 // Constants
-import { isHallucination } from './constants';
+import { isHallucination, isAssistantResponse, isRepeatedTranscription, clearRecentTranscriptions, cleanTranslation } from './constants';
 
 export default function App() {
   // Connection & Status
@@ -54,10 +54,17 @@ export default function App() {
   const [isVoiceMode, setIsVoiceMode] = useState(false);
   const [voiceType, setVoiceType] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
   const [isSpeakingTTS, setIsSpeakingTTS] = useState(false);
-  const [voiceOnlyMode, setVoiceOnlyMode] = useState(() => 
+  const isSpeakingTTSRef = useRef(false);
+  const [voiceOnlyMode, setVoiceOnlyMode] = useState(() =>
     localStorage.getItem('translatorVoiceOnly') === 'true'
   );
-  
+  const [audioOutput, setAudioOutput] = useState(() =>
+    localStorage.getItem('translatorAudioOutput') || ''
+  );
+  const [showOriginalText, setShowOriginalText] = useState(() =>
+    localStorage.getItem('translatorShowOriginal') !== 'false'
+  );
+
   // Refs
   const isListeningRef = useRef(false);
   const isVoiceModeRef = useRef(false);
@@ -65,6 +72,10 @@ export default function App() {
   const websocketRef = useRef(null);
   const accumulatedTextRef = useRef('');  // Accumulate transcriptions until sentence ends
   const sentenceTimeoutRef = useRef(null);  // Timeout to force response if no punctuation
+  const recentTranslationsRef = useRef([]);  // Track recent translations to detect duplicates
+  const isResponsePendingRef = useRef(false);  // Prevent multiple concurrent response requests
+  const audioCaptureRef = useRef(null);  // For hallucination detection
+  const ttsEndTimeoutRef = useRef(null);
 
   // Hooks
   const { microphones, selectedMic, selectMic, error: micError } = useMicrophones();
@@ -83,14 +94,6 @@ export default function App() {
     maxCharsPerLine 
   });
 
-  // Check if text contains any sentence-ending punctuation (anywhere, not just end)
-  const containsSentencePunctuation = useCallback((text) => {
-    if (!text) return false;
-    // Korean, English, and common sentence-ending punctuation
-    return /[.!?。！？]/.test(text);
-  }, []);
-
-  // Check if text ends with sentence-ending punctuation
   const endsWithPunctuation = useCallback((text) => {
     if (!text) return false;
     return /[.!?。！？]$/.test(text.trim());
@@ -121,18 +124,21 @@ export default function App() {
     if (endsWithPunctuation(text)) {
       return { should: true, reason: 'ends with punctuation' };
     }
-    if (containsSentencePunctuation(text)) {
-      return { should: true, reason: 'contains sentence punctuation' };
-    }
     if (isTextSufficientLength(text)) {
       return { should: true, reason: `sufficient length (${text.length} chars)` };
     }
     return { should: false, reason: '' };
-  }, [endsWithPunctuation, containsSentencePunctuation, isTextSufficientLength]);
+  }, [endsWithPunctuation, isTextSufficientLength]);
 
-  // Try to request a response - allow parallel responses
+  // Try to request a response - prevent concurrent requests
   const tryRequestResponse = useCallback(() => {
     if (!accumulatedTextRef.current) {
+      return;
+    }
+
+    // Prevent concurrent response requests
+    if (isResponsePendingRef.current) {
+      console.log('[Response] Skipping - response already pending');
       return;
     }
 
@@ -146,6 +152,7 @@ export default function App() {
     accumulatedTextRef.current = '';  // Clear accumulated text immediately
 
     console.log('[Response] Requesting response for:', textToTranslate);
+    isResponsePendingRef.current = true;
     websocketRef.current?.requestResponse();
   }, []);
 
@@ -170,43 +177,59 @@ export default function App() {
           console.log('[Transcription] Raw:', transcript?.substring(0, 80));
 
           if (transcript) {
+            // Check 1: Audio-level based hallucination detection
+            const hadSpeech = audioCaptureRef.current?.hadRecentSpeech?.(3000) ?? true;
+            if (!hadSpeech) {
+              console.log('[Transcription] Blocked - no recent speech detected (likely hallucination):', transcript.substring(0, 50));
+              break;
+            }
+
+            // Check 2: Pattern-based hallucination detection
             const isHalluc = isHallucination(transcript);
-            console.log('[Transcription] isHallucination:', isHalluc);
+            if (isHalluc) {
+              console.log('[Transcription] Blocked - pattern hallucination:', transcript.substring(0, 50));
+              break;
+            }
 
-            if (!isHalluc) {
-              // Always show original text
-              setOriginalText(prev => [...prev, transcript]);
+            // Check 3: Repetition detection (same text appearing multiple times)
+            if (isRepeatedTranscription(transcript)) {
+              console.log('[Transcription] Blocked - repeated text (likely hallucination):', transcript.substring(0, 50));
+              break;
+            }
 
-              // Accumulate transcription
-              accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + transcript;
-              console.log('[Accumulated]', accumulatedTextRef.current.substring(0, 100));
+            // Passed all checks - show original text
+            setOriginalText(prev => [...prev, transcript]);
 
-              // Clear any existing timeout
-              if (sentenceTimeoutRef.current) {
-                clearTimeout(sentenceTimeoutRef.current);
-                sentenceTimeoutRef.current = null;
-              }
+            // Accumulate transcription
+            accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + transcript;
+            console.log('[Accumulated]', accumulatedTextRef.current.substring(0, 100));
 
-              // Check if we should translate now
-              const result = shouldRequestTranslation(accumulatedTextRef.current);
-              console.log('[Check]', result);
+            // Clear any existing timeout
+            if (sentenceTimeoutRef.current) {
+              clearTimeout(sentenceTimeoutRef.current);
+              sentenceTimeoutRef.current = null;
+            }
 
-              if (result.should) {
-                console.log(`[Ready to translate] Reason: ${result.reason}`);
-                updateStatus('processing', 'Translating...');
-                tryRequestResponse();
-              } else {
-                console.log(`[Waiting] ${accumulatedTextRef.current.length} chars`);
-                updateStatus('listening', 'Listening...');
-                // Set timeout as fallback
-                sentenceTimeoutRef.current = setTimeout(() => {
-                  if (accumulatedTextRef.current) {
-                    console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars)`);
-                    updateStatus('processing', 'Translating...');
-                    tryRequestResponse();
-                  }
-                }, 2000);
-              }
+            // Check if we should translate now
+            const result = shouldRequestTranslation(accumulatedTextRef.current);
+            console.log('[Check]', result);
+
+            if (result.should) {
+              console.log(`[Ready to translate] Reason: ${result.reason}`);
+              updateStatus('processing', 'Translating...');
+              tryRequestResponse();
+            } else {
+              console.log(`[Waiting] ${accumulatedTextRef.current.length} chars`);
+              updateStatus('listening', 'Listening...');
+              // Set timeout as fallback
+              sentenceTimeoutRef.current = setTimeout(() => {
+                // Check if still listening before processing
+                if (accumulatedTextRef.current && isListeningRef.current) {
+                  console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars)`);
+                  updateStatus('processing', 'Translating...');
+                  tryRequestResponse();
+                }
+              }, 2000);
             }
           }
         } catch (err) {
@@ -217,18 +240,58 @@ export default function App() {
       case 'response.text.delta':
       case 'response.audio_transcript.delta':
         if (event.delta) {
-          currentTranslationRef.current += event.delta;
-          setCurrentTranslation(prev => prev + event.delta);
+          const newText = currentTranslationRef.current + event.delta;
+          if (newText.length < 40 && isAssistantResponse(newText)) {
+            currentTranslationRef.current = '';
+            setCurrentTranslation('');
+            break;
+          }
+          currentTranslationRef.current = newText;
+          setCurrentTranslation(newText);
         }
         break;
 
       case 'response.text.done':
       case 'response.audio_transcript.done':
         if (currentTranslationRef.current) {
-          const finalText = currentTranslationRef.current;
-          setTranslatedText(prev => [...prev, finalText]);
+          let finalText = currentTranslationRef.current;
           currentTranslationRef.current = '';
           setCurrentTranslation('');
+
+          // Filter out assistant responses (model acting as assistant instead of translator)
+          if (isAssistantResponse(finalText)) {
+            console.log('[Filter] Blocked assistant response:', finalText.substring(0, 50));
+            break;
+          }
+
+          // Clean trailing assistant content from translation
+          const cleanedText = cleanTranslation(finalText);
+          if (cleanedText !== finalText) {
+            console.log('[Filter] Cleaned trailing content:', finalText.substring(0, 80), '→', cleanedText.substring(0, 80));
+            finalText = cleanedText;
+          }
+
+          // Skip if cleaning resulted in empty text
+          if (!finalText || finalText.trim().length === 0) {
+            break;
+          }
+
+          // Check for exact duplicate (only the last translation)
+          const normalizedText = finalText.trim().toLowerCase();
+          const lastTranslation = recentTranslationsRef.current[recentTranslationsRef.current.length - 1];
+
+          if (lastTranslation === normalizedText) {
+            console.log('[Filter] Blocked exact duplicate:', finalText.substring(0, 50));
+            break;
+          }
+
+          // Add to recent translations (keep last 3)
+          recentTranslationsRef.current.push(normalizedText);
+          if (recentTranslationsRef.current.length > 3) {
+            recentTranslationsRef.current.shift();
+          }
+
+          setTranslatedText(prev => [...prev, finalText]);
         }
         break;
 
@@ -236,7 +299,13 @@ export default function App() {
         if (event.delta && isVoiceModeRef.current) {
           realtimeAudio.playAudioChunk(event.delta);
 
-          if (!isSpeakingTTS) {
+          if (ttsEndTimeoutRef.current) {
+            clearTimeout(ttsEndTimeoutRef.current);
+            ttsEndTimeoutRef.current = null;
+          }
+
+          if (!isSpeakingTTSRef.current) {
+            isSpeakingTTSRef.current = true;
             setIsSpeakingTTS(true);
           }
 
@@ -250,22 +319,49 @@ export default function App() {
 
       case 'response.audio.done':
         realtimeAudio.onAudioDone();
-        setTimeout(() => {
+        ttsEndTimeoutRef.current = setTimeout(() => {
+          ttsEndTimeoutRef.current = null;
+          isSpeakingTTSRef.current = false;
           setIsSpeakingTTS(false);
         }, 500);
         break;
 
       case 'response.done':
-        // Response finished
         console.log('[Response Done]');
-        updateStatus('connected', 'Connected');
+        isResponsePendingRef.current = false;
+
+        if (isListeningRef.current) {
+          updateStatus('listening', 'Listening...');
+          // Process any text that accumulated while waiting for this response
+          if (accumulatedTextRef.current) {
+            const pendingResult = shouldRequestTranslation(accumulatedTextRef.current);
+            if (pendingResult.should) {
+              console.log('[Response Done] Processing pending accumulated text:', accumulatedTextRef.current.substring(0, 50));
+              updateStatus('processing', 'Translating...');
+              tryRequestResponse();
+            }
+          }
+        } else {
+          updateStatus('connected', 'Connected');
+        }
         break;
 
       case 'error':
+        isResponsePendingRef.current = false;
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, realtimeAudio, subtitle, isSpeakingTTS, shouldRequestTranslation, tryRequestResponse]);
+  }, [updateStatus, realtimeAudio, subtitle, shouldRequestTranslation, tryRequestResponse]);
+
+  // Handle WebSocket disconnect - reset pending states
+  const handleDisconnect = useCallback(() => {
+    isResponsePendingRef.current = false;
+    accumulatedTextRef.current = '';
+    if (sentenceTimeoutRef.current) {
+      clearTimeout(sentenceTimeoutRef.current);
+      sentenceTimeoutRef.current = null;
+    }
+  }, []);
 
   // WebSocket connection
   const websocket = useWebSocket({
@@ -277,6 +373,7 @@ export default function App() {
     isVoiceMode,
     onStatusChange: updateStatus,
     onServerEvent: handleServerEvent,
+    onDisconnect: handleDisconnect,
   });
 
   // Sync websocket ref for use in event handlers
@@ -292,6 +389,9 @@ export default function App() {
     },
     onError: (msg) => updateStatus('error', msg),
   });
+
+  // Sync audioCapture ref for hallucination detection in event handlers
+  audioCaptureRef.current = audioCapture;
 
   // Start listening
   const startListening = async () => {
@@ -319,10 +419,19 @@ export default function App() {
     setIsListening(false);
     setAudioLevel(0);
     accumulatedTextRef.current = '';
+    isResponsePendingRef.current = false;
+    recentTranslationsRef.current = [];
+    clearRecentTranscriptions(); // Clear repetition detection history
     if (sentenceTimeoutRef.current) {
       clearTimeout(sentenceTimeoutRef.current);
       sentenceTimeoutRef.current = null;
     }
+    if (ttsEndTimeoutRef.current) {
+      clearTimeout(ttsEndTimeoutRef.current);
+      ttsEndTimeoutRef.current = null;
+    }
+    isSpeakingTTSRef.current = false;
+    setIsSpeakingTTS(false);
     audioCapture.stopCapture();
     websocket.disconnect();
     realtimeAudio.resetTiming();
@@ -375,6 +484,12 @@ export default function App() {
     localStorage.setItem('translatorVoiceOnly', newValue.toString());
   };
 
+  const toggleShowOriginalText = () => {
+    const newValue = !showOriginalText;
+    setShowOriginalText(newValue);
+    localStorage.setItem('translatorShowOriginal', newValue.toString());
+  };
+
   // Effects
   useEffect(() => {
     const handleSettingsClosed = () => {
@@ -383,9 +498,10 @@ export default function App() {
       selectMic(localStorage.getItem('translatorMic') || '');
       setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
       setDirection(localStorage.getItem('translatorDirection') || 'auto');
+      setAudioOutput(localStorage.getItem('translatorAudioOutput') || '');
     };
     window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
-    
+
     // Check if already in subtitle mode
     window.electronAPI?.getSubtitleMode?.().then(mode => {
       setIsSubtitleMode(mode || false);
@@ -398,10 +514,27 @@ export default function App() {
     realtimeAudio.setEnabled(isVoiceMode);
   }, [isVoiceMode, realtimeAudio]);
 
+  // Sync audio output device
+  useEffect(() => {
+    if (audioOutput) {
+      realtimeAudio.setOutputDevice(audioOutput);
+    }
+  }, [audioOutput, realtimeAudio]);
+
   // Sync subtitle mode ref
   useEffect(() => {
     isSubtitleModeRef.current = isSubtitleMode;
   }, [isSubtitleMode]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (sentenceTimeoutRef.current) {
+        clearTimeout(sentenceTimeoutRef.current);
+        sentenceTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Process translations into subtitle queue
   useEffect(() => {
@@ -483,6 +616,7 @@ export default function App() {
           isVoiceMode={isVoiceMode}
           voiceOnlyMode={voiceOnlyMode}
           isSpeakingTTS={isSpeakingTTS}
+          showOriginalText={showOriginalText}
         />
 
         <ControlBar
@@ -502,6 +636,8 @@ export default function App() {
           isSpeakingTTS={isSpeakingTTS}
           voiceOnlyMode={voiceOnlyMode}
           onToggleVoiceOnlyMode={toggleVoiceOnlyMode}
+          showOriginalText={showOriginalText}
+          onToggleShowOriginalText={toggleShowOriginalText}
           onClear={clearTranscripts}
         />
       </main>

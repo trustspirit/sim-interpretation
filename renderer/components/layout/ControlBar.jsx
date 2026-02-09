@@ -10,7 +10,9 @@ import {
   VolumeX,
   Trash2,
   Eye,
-  EyeOff
+  EyeOff,
+  MessageSquare,
+  MessageSquareOff
 } from 'lucide-react';
 import { VoiceSelector } from '../selectors';
 
@@ -31,6 +33,8 @@ export default function ControlBar({
   isSpeakingTTS,
   voiceOnlyMode,
   onToggleVoiceOnlyMode,
+  showOriginalText,
+  onToggleShowOriginalText,
   onClear,
 }) {
   return (
@@ -86,6 +90,19 @@ export default function ControlBar({
         title={textDirection === 'down' ? 'Top to bottom' : 'Bottom to top'}
       >
         {textDirection === 'down' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+      </button>
+
+      {/* Show/Hide Original Text Toggle */}
+      <button
+        onClick={onToggleShowOriginalText}
+        className={`p-2.5 border rounded-lg transition-colors ${
+          showOriginalText
+            ? 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
+            : 'bg-codex-warning/20 border-codex-warning text-codex-warning'
+        }`}
+        title={showOriginalText ? 'Hide original text' : 'Show original text'}
+      >
+        {showOriginalText ? <MessageSquare size={16} /> : <MessageSquareOff size={16} />}
       </button>
 
       {/* Subtitle Mode Toggle */}

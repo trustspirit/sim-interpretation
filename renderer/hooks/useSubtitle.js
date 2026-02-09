@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect, useState } from 'react';
+import { useRef, useCallback, useEffect, useState, useMemo } from 'react';
 import { MS_PER_WORD, MS_PER_CJK_CHAR, MIN_SUBTITLE_DISPLAY_MS, MAX_SUBTITLE_DISPLAY_MS } from '../constants';
 
 export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
@@ -166,7 +166,7 @@ export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
     };
   }, []);
 
-  return {
+  return useMemo(() => ({
     currentSubtitle,
     queue,
     addTranslation,
@@ -178,5 +178,5 @@ export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
     hasQueue: () => queueRef.current.length > 0,
     getLastProcessedIndex: () => lastProcessedIndexRef.current,
     setLastProcessedIndex: (index) => { lastProcessedIndexRef.current = index; },
-  };
+  }), [currentSubtitle, queue, addTranslation, startProcessing, clear]);
 }
