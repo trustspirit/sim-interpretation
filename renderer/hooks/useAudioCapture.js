@@ -39,7 +39,7 @@ export default function useAudioCapture({
   const hasAudioToCommitRef = useRef(false); // Track if audio has been sent since last commit
   const lastBufferClearRef = useRef(0);      // Track last buffer clear time
   const preBufferRef = useRef([]);           // Pre-buffer to capture speech onset
-  const PRE_BUFFER_SIZE = 2;                 // Keep last 2 chunks (~200ms) for speech onset
+  const PRE_BUFFER_SIZE = 3;                 // Keep last 3 chunks (~300ms) for speech onset (Korean initial consonants)
 
   const startCapture = useCallback(async () => {
     try {
@@ -54,14 +54,15 @@ export default function useAudioCapture({
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: true
+            autoGainControl: false,  // AGC causes gain-pumping artifacts that confuse Whisper
+            channelCount: 1,         // Force mono — consistent input for transcription
           }
         });
       } catch {
         // Selected mic not found — fallback to default mic
         console.log('[Audio] Selected mic failed, falling back to default');
         stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 }
         });
       }
 

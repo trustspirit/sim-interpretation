@@ -97,7 +97,12 @@ export default function App() {
 
   const endsWithPunctuation = useCallback((text) => {
     if (!text) return false;
-    return /[.!?。！？]$/.test(text.trim());
+    const trimmed = text.trim();
+    // Standard punctuation
+    if (/[.!?。！？]$/.test(trimmed)) return true;
+    // Korean sentence-final endings (종결어미) — triggers immediate translation
+    if (/(?:습니다|합니다|됩니다|입니다|됩니까|습니까|세요|에요|해요|어요|네요|군요|거든요|잖아요|는데요|을까요|ㅂ니다|ㅂ니까)$/.test(trimmed)) return true;
+    return false;
   }, []);
 
   // Check if accumulated text is long enough to translate
@@ -208,7 +213,7 @@ export default function App() {
             });
 
             // Accumulate transcription
-            accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + transcript;
+            accumulatedTextRef.current += (accumulatedTextRef.current ? ' | ' : '') + transcript;
             console.log('[Accumulated]', accumulatedTextRef.current.substring(0, 100));
 
             // Clear any existing timeout
@@ -226,17 +231,24 @@ export default function App() {
               updateStatus('processing', 'Translating...');
               tryRequestResponse();
             } else {
-              console.log(`[Waiting] ${accumulatedTextRef.current.length} chars`);
+              // Adaptive timeout: short text waits longer (may be incomplete),
+              // long text flushes faster (likely a complete thought)
+              const pending = accumulatedTextRef.current;
+              const hasCJK = /[\u3131-\uD79D\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]/.test(pending);
+              const isLong = hasCJK ? pending.length >= 12 : pending.length >= 30;
+              const timeoutMs = isLong ? 1200 : 2500;
+
+              console.log(`[Waiting] ${pending.length} chars, timeout ${timeoutMs}ms`);
               updateStatus('listening', 'Listening...');
-              // Set timeout as fallback
+              // Set adaptive timeout as fallback
               sentenceTimeoutRef.current = setTimeout(() => {
                 // Check if still listening before processing
                 if (accumulatedTextRef.current && isListeningRef.current) {
-                  console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars)`);
+                  console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars, ${timeoutMs}ms)`);
                   updateStatus('processing', 'Translating...');
                   tryRequestResponse();
                 }
-              }, 2000);
+              }, timeoutMs);
             }
           }
         } catch (err) {

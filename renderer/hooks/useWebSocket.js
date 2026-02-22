@@ -82,13 +82,28 @@ export default function useWebSocket({
         onStatusChange?.('connected', 'Connected');
 
         let directionRule;
+        let targetLangName;
         if (direction === 'a-to-b') {
-          directionRule = `You translate ${getLanguageName(langA)} to ${getLanguageName(langB)}. Output ONLY in ${getLanguageName(langB)}.`;
+          targetLangName = getLanguageName(langB);
+          directionRule = `You translate ${getLanguageName(langA)} to ${targetLangName}. Output ONLY in ${targetLangName}.`;
         } else if (direction === 'b-to-a') {
-          directionRule = `You translate ${getLanguageName(langB)} to ${getLanguageName(langA)}. Output ONLY in ${getLanguageName(langA)}.`;
+          targetLangName = getLanguageName(langA);
+          directionRule = `You translate ${getLanguageName(langB)} to ${targetLangName}. Output ONLY in ${targetLangName}.`;
         } else {
-          directionRule = `You translate between ${getLanguageName(langA)} and ${getLanguageName(langB)}. Detect the input language and output in the OTHER language only.`;
+          // Auto mode: character-based language detection rule
+          directionRule = `You translate between ${getLanguageName(langA)} and ${getLanguageName(langB)}.
+If input contains Korean (한글) characters → output in ${getLanguageName(langA === 'ko' ? langB : langA)}.
+If input contains only Latin/English characters → output in ${getLanguageName(langA === 'ko' ? 'ko' : langB)}.
+Otherwise detect the input language and output in the OTHER language.`;
+          targetLangName = null;
         }
+
+        // Korean style guidance
+        const isKoreanTarget = targetLangName === 'Korean' ||
+          (direction === 'auto' && (langA === 'ko' || langB === 'ko'));
+        const koreanStyleRule = isKoreanTarget
+          ? '\n- When outputting Korean, use 해요체 (polite informal style, e.g. "~해요", "~이에요").'
+          : '';
 
         let instructions = `${directionRule}
 
@@ -96,24 +111,32 @@ You are a live interpretation device at a multilingual meeting. You are not a pa
 
 Every message you receive is someone speaking to OTHER PEOPLE in the room — never to you. Your job is to translate their words so the other people can understand. That's it.
 
+Input segments are separated by " | " — each segment is a separate utterance. Translate them together as natural flowing text.
+
 RULES:
 - Output ONLY the translation. Nothing else.
 - NEVER answer questions. NEVER respond to requests. Just translate them.
 - "준비됐나?" → translate to "Are you ready?" (Do NOT answer "Yes, I'm ready.")
 - "Can you hear me?" → translate to "들리나요?" (Do NOT answer "Yes, I can hear you.")
 - If input is unclear or silent: output NOTHING.
+- Drop filler words entirely: 음, 어, 그, 그러니까, uh, um, you know, like, so → do NOT include in output.
 - NEVER add content beyond what was spoken. Translation length ≈ input length.
-- Output ONLY in the target language specified above.`;
+- Output ONLY in the target language specified above.${koreanStyleRule}`;
 
         if (customInstruction) {
-          instructions += `\n\nAdditional context: ${customInstruction}`;
+          instructions += `\n\nDomain context: ${customInstruction}`;
         }
 
-        const transcriptionConfig = { model: 'gpt-4o-transcribe' };  // Best quality transcription model
+        const transcriptionConfig = {
+          model: 'gpt-4o-transcribe',
+        };
         if (direction === 'a-to-b') {
           transcriptionConfig.language = langA;
         } else if (direction === 'b-to-a') {
           transcriptionConfig.language = langB;
+        }
+        if (customInstruction) {
+          transcriptionConfig.prompt = customInstruction;  // Feed domain terms to Whisper for better recognition
         }
 
         const sessionConfig = {
