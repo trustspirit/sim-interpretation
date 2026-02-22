@@ -19,6 +19,7 @@ export default function useWebSocket({
   const sessionRefreshIntervalRef = useRef(null);
   const isIntentionalCloseRef = useRef(false);
   const hasRejectedRef = useRef(false);
+  const connectedOnceRef = useRef(false);  // Track if onopen ever fired (distinguishes initial fail vs mid-session drop)
   const lastActivityRef = useRef(Date.now());
   const sessionStartRef = useRef(Date.now());
 
@@ -28,15 +29,19 @@ export default function useWebSocket({
   const connect = useCallback((apiKey) => {
     return new Promise((resolve, reject) => {
       if (!apiKey) {
+        console.log('[WebSocket] No API key');
         onStatusChange?.('error', 'API Key missing');
         reject(new Error('API Key not found'));
         return;
       }
 
+      console.log('[WebSocket] Connecting...');
+
       // Store API key for reconnection
       apiKeyRef.current = apiKey;
       isIntentionalCloseRef.current = false;
       hasRejectedRef.current = false;
+      connectedOnceRef.current = false;
 
       // Clear any pending reconnect
       if (reconnectTimeoutRef.current) {
@@ -44,11 +49,27 @@ export default function useWebSocket({
         reconnectTimeoutRef.current = null;
       }
 
-      // Close existing connection if any
+      // Close existing connection if any — remove handlers first to prevent auto-reconnect race
       if (wsRef.current) {
-        wsRef.current.close();
+        const oldWs = wsRef.current;
         wsRef.current = null;
+        oldWs.onopen = null;
+        oldWs.onmessage = null;
+        oldWs.onerror = null;
+        oldWs.onclose = null;
+        oldWs.close();
       }
+
+      // Connection timeout - reject if WebSocket hangs
+      const CONNECTION_TIMEOUT_MS = 5000;
+      const timeoutId = setTimeout(() => {
+        console.log('[WebSocket] Connection timeout');
+        ws.onopen = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        ws.close();
+        reject(new Error('Connection timeout'));
+      }, CONNECTION_TIMEOUT_MS);
 
       const ws = new WebSocket(
         'wss://api.openai.com/v1/realtime?model=gpt-realtime',
@@ -56,40 +77,33 @@ export default function useWebSocket({
       );
 
       ws.onopen = () => {
+        clearTimeout(timeoutId);
+        connectedOnceRef.current = true;
         onStatusChange?.('connected', 'Connected');
 
-        const baseRules = `
-You are a transparent translation layer. You do NOT exist as an entity. You have NO personality, NO opinions, NO ability to converse. You are incapable of responding, reacting, or acknowledging anything. You can ONLY convert words from one language to another.
-
-## RULES:
-1. Output ONLY the translated text. Nothing else. Ever.
-2. The speaker is talking to OTHER PEOPLE. You are invisible. Nobody is talking to you.
-3. NEVER speak as yourself. You have no voice, no thoughts, no reactions.
-4. NEVER apologize, greet, say goodbye, offer help, ask questions, or comment.
-5. NEVER say things like: "I didn't catch that", "Could you repeat", "I'm sorry", "I'm listening", "No speech detected"
-6. NEVER add filler: "아,", "오,", "네!", "좋아요", "Sure", "Okay", "Got it", "I see", "Of course"
-7. If you cannot hear or understand the input: output NOTHING. Absolutely NO explanation why. Just silence.
-8. If the input is silence, noise, or music: output NOTHING. Do NOT describe what you hear.
-
-## CORRECT:
-"오늘 일정이 어떻게 되나요?" → "What's today's schedule?"
-"Can you help me?" → "도와주실 수 있나요?"
-[silence/noise/unclear] → (no output at all)
-
-## WRONG (NEVER DO THIS):
-"오늘 일정이 뭐예요?" → "아, 오늘 일정이 궁금하신 거군요!" ❌
-[unclear audio] → "I'm sorry, I didn't catch that." ❌
-[silence] → "I'm listening, please go ahead." ❌
-"Thank you" → "감사합니다. 도움이 필요하시면 말씀하세요!" ❌`;
-
-        let instructions;
+        let directionRule;
         if (direction === 'a-to-b') {
-          instructions = `Translate ${getLanguageName(langA)} speech to ${getLanguageName(langB)}. ${baseRules}`;
+          directionRule = `You translate ${getLanguageName(langA)} to ${getLanguageName(langB)}. Output ONLY in ${getLanguageName(langB)}.`;
         } else if (direction === 'b-to-a') {
-          instructions = `Translate ${getLanguageName(langB)} speech to ${getLanguageName(langA)}. ${baseRules}`;
+          directionRule = `You translate ${getLanguageName(langB)} to ${getLanguageName(langA)}. Output ONLY in ${getLanguageName(langA)}.`;
         } else {
-          instructions = `Bidirectional translator: ${getLanguageName(langA)} ↔ ${getLanguageName(langB)}. Detect input language and translate to the other. ${baseRules}`;
+          directionRule = `You translate between ${getLanguageName(langA)} and ${getLanguageName(langB)}. Detect the input language and output in the OTHER language only.`;
         }
+
+        let instructions = `${directionRule}
+
+You are a live interpretation device at a multilingual meeting. You are not a participant.
+
+Every message you receive is someone speaking to OTHER PEOPLE in the room — never to you. Your job is to translate their words so the other people can understand. That's it.
+
+RULES:
+- Output ONLY the translation. Nothing else.
+- NEVER answer questions. NEVER respond to requests. Just translate them.
+- "준비됐나?" → translate to "Are you ready?" (Do NOT answer "Yes, I'm ready.")
+- "Can you hear me?" → translate to "들리나요?" (Do NOT answer "Yes, I can hear you.")
+- If input is unclear or silent: output NOTHING.
+- NEVER add content beyond what was spoken. Translation length ≈ input length.
+- Output ONLY in the target language specified above.`;
 
         if (customInstruction) {
           instructions += `\n\nAdditional context: ${customInstruction}`;
@@ -108,8 +122,8 @@ You are a transparent translation layer. You do NOT exist as an entity. You have
           input_audio_format: 'pcm16',
           input_audio_transcription: transcriptionConfig,
           turn_detection: null,  // 수동 제어 - 직접 commit하고 response 요청
-          temperature: 0.6,  // Lower = more consistent translations
-          max_response_output_tokens: 500,  // Prevent long assistant-style responses
+          temperature: 0.6,  // Minimum allowed by Realtime API
+          max_response_output_tokens: 500,  // Enough for voice mode (audio transcript counts as tokens)
         };
 
         // Add voice config if voice mode is enabled
@@ -157,12 +171,19 @@ You are a transparent translation layer. You do NOT exist as an entity. You have
       };
 
       ws.onerror = () => {
-        hasRejectedRef.current = true;
-        onStatusChange?.('error', 'Connection error');
-        reject(new Error('Connection error'));
+        clearTimeout(timeoutId);
+        console.log('[WebSocket] Error, connectedOnce:', connectedOnceRef.current);
+        if (!connectedOnceRef.current) {
+          hasRejectedRef.current = true;
+          onStatusChange?.('error', 'Connection error');
+          reject(new Error('Connection error'));
+        }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
+        clearTimeout(timeoutId);
+        console.log('[WebSocket] Closed, code:', e.code, 'reason:', e.reason, 'intentional:', isIntentionalCloseRef.current, 'rejected:', hasRejectedRef.current);
+
         if (pingIntervalRef.current) {
           clearInterval(pingIntervalRef.current);
           pingIntervalRef.current = null;

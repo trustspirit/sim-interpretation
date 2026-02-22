@@ -17,17 +17,6 @@ class AudioProcessor extends AudioWorkletProcessor {
         return true;
       }
 
-      // Calculate audio level for visualization (every frame)
-      let sum = 0;
-      for (let i = 0; i < inputChannel.length; i++) {
-        sum += inputChannel[i] * inputChannel[i];
-      }
-      const rms = Math.sqrt(sum / inputChannel.length);
-      const level = Math.min(1, rms * 8); // Amplify for better visibility
-
-      // Always send level for smooth visualization
-      this.port.postMessage({ type: 'level', level: level });
-
       for (let i = 0; i < inputChannel.length; i++) {
         this.buffer[this.bufferIndex++] = inputChannel[i];
 

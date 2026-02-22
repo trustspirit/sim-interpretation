@@ -1,9 +1,9 @@
 import { useRef, useCallback } from 'react';
 
 // Audio detection thresholds (tuned for translation quality)
-const SILENCE_THRESHOLD = 0.04;      // Lower = more sensitive (detect quieter speech)
+const SILENCE_THRESHOLD = 0.06;      // Higher = less noise triggers (was 0.04)
 const SILENCE_DURATION_MS = 600;     // Wait 600ms of silence before commit (complete sentences)
-const MIN_SPEECH_DURATION_MS = 400;  // Ignore speech shorter than 400ms (reduce noise triggers)
+const MIN_SPEECH_DURATION_MS = 600;  // Ignore speech shorter than 600ms (was 400ms, reduce noise/hallucination)
 
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
@@ -37,6 +37,9 @@ export default function useAudioCapture({
   const speechStartRef = useRef(null);
   const lastSpeechEndRef = useRef(0); // Track when speech last ended (for hallucination detection)
   const hasAudioToCommitRef = useRef(false); // Track if audio has been sent since last commit
+  const lastBufferClearRef = useRef(0);      // Track last buffer clear time
+  const preBufferRef = useRef([]);           // Pre-buffer to capture speech onset
+  const PRE_BUFFER_SIZE = 2;                 // Keep last 2 chunks (~200ms) for speech onset
 
   const startCapture = useCallback(async () => {
     try {
@@ -44,14 +47,23 @@ export default function useAudioCapture({
       const currentCaptureId = ++captureIdRef.current;
       isActiveRef.current = true;
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: selectedMic ? { exact: selectedMic } : undefined,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: selectedMic ? { exact: selectedMic } : undefined,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+      } catch {
+        // Selected mic not found — fallback to default mic
+        console.log('[Audio] Selected mic failed, falling back to default');
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+      }
 
       // Check if this capture session is still valid
       if (currentCaptureId !== captureIdRef.current) {
@@ -78,11 +90,26 @@ export default function useAudioCapture({
 
       const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       worklet.port.onmessage = (event) => {
-        // Check both isActive and captureId
         if (event.data.type === 'audio' && isActiveRef.current && currentCaptureId === captureIdRef.current) {
           const base64Audio = arrayBufferToBase64(event.data.buffer);
-          hasAudioToCommitRef.current = true; // Mark that we have audio to commit
-          onAudioData?.(base64Audio);
+
+          if (isSpeakingRef.current) {
+            // Speaking: flush pre-buffer first (captures speech onset), then send live
+            if (preBufferRef.current.length > 0) {
+              for (const buffered of preBufferRef.current) {
+                onAudioData?.(buffered);
+              }
+              preBufferRef.current = [];
+            }
+            hasAudioToCommitRef.current = true;
+            onAudioData?.(base64Audio);
+          } else {
+            // Silent: buffer locally, don't send to server
+            preBufferRef.current.push(base64Audio);
+            if (preBufferRef.current.length > PRE_BUFFER_SIZE) {
+              preBufferRef.current.shift();
+            }
+          }
         }
       };
       source.connect(worklet);
@@ -102,6 +129,7 @@ export default function useAudioCapture({
     silenceStartRef.current = null;
     speechStartRef.current = null;
     hasAudioToCommitRef.current = false;
+    preBufferRef.current = [];
 
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);

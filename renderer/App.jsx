@@ -76,6 +76,7 @@ export default function App() {
   const isResponsePendingRef = useRef(false);  // Prevent multiple concurrent response requests
   const audioCaptureRef = useRef(null);  // For hallucination detection
   const ttsEndTimeoutRef = useRef(null);
+  const conversationItemIdsRef = useRef([]);  // Track item IDs for cleanup
 
   // Hooks
   const { microphones, selectedMic, selectMic, error: micError } = useMicrophones();
@@ -166,8 +167,11 @@ export default function App() {
 
     switch (event.type) {
       case 'input_audio_buffer.committed':
-        // Audio buffer was committed (by our manual commit)
-        console.log('[Committed] Audio buffer committed');
+        // Audio buffer was committed - track item ID for later cleanup
+        if (event.item_id) {
+          conversationItemIdsRef.current.push(event.item_id);
+        }
+        console.log('[Committed] Audio buffer committed, item:', event.item_id);
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -177,8 +181,8 @@ export default function App() {
           console.log('[Transcription] Raw:', transcript?.substring(0, 80));
 
           if (transcript) {
-            // Check 1: Audio-level based hallucination detection
-            const hadSpeech = audioCaptureRef.current?.hadRecentSpeech?.(3000) ?? true;
+            // Check 1: Audio-level based hallucination detection (2s window)
+            const hadSpeech = audioCaptureRef.current?.hadRecentSpeech?.(2000) ?? true;
             if (!hadSpeech) {
               console.log('[Transcription] Blocked - no recent speech detected (likely hallucination):', transcript.substring(0, 50));
               break;
@@ -198,7 +202,10 @@ export default function App() {
             }
 
             // Passed all checks - show original text
-            setOriginalText(prev => [...prev, transcript]);
+            setOriginalText(prev => {
+              const next = [...prev, transcript];
+              return next.length > 50 ? next.slice(-50) : next;
+            });
 
             // Accumulate transcription
             accumulatedTextRef.current += (accumulatedTextRef.current ? ' ' : '') + transcript;
@@ -241,7 +248,10 @@ export default function App() {
       case 'response.audio_transcript.delta':
         if (event.delta) {
           const newText = currentTranslationRef.current + event.delta;
-          if (newText.length < 40 && isAssistantResponse(newText)) {
+          // Only check assistant response on first ~50 chars (early kill)
+          // Longer text may false-positive on unanchored patterns like /설명해/, /정리해/
+          if (newText.length < 50 && isAssistantResponse(newText)) {
+            console.log('[Filter] Streaming kill - assistant response:', newText.substring(0, 60));
             currentTranslationRef.current = '';
             setCurrentTranslation('');
             break;
@@ -276,22 +286,25 @@ export default function App() {
             break;
           }
 
-          // Check for exact duplicate (only the last translation)
+          // Check for duplicate against ALL recent translations (not just last)
           const normalizedText = finalText.trim().toLowerCase();
-          const lastTranslation = recentTranslationsRef.current[recentTranslationsRef.current.length - 1];
+          const isDuplicate = recentTranslationsRef.current.some(recent => recent === normalizedText);
 
-          if (lastTranslation === normalizedText) {
-            console.log('[Filter] Blocked exact duplicate:', finalText.substring(0, 50));
+          if (isDuplicate) {
+            console.log('[Filter] Blocked duplicate translation:', finalText.substring(0, 50));
             break;
           }
 
-          // Add to recent translations (keep last 3)
+          // Add to recent translations (keep last 5)
           recentTranslationsRef.current.push(normalizedText);
-          if (recentTranslationsRef.current.length > 3) {
+          if (recentTranslationsRef.current.length > 5) {
             recentTranslationsRef.current.shift();
           }
 
-          setTranslatedText(prev => [...prev, finalText]);
+          setTranslatedText(prev => {
+              const next = [...prev, finalText];
+              return next.length > 50 ? next.slice(-50) : next;
+            });
         }
         break;
 
@@ -330,6 +343,22 @@ export default function App() {
         console.log('[Response Done]');
         isResponsePendingRef.current = false;
 
+        // Track response output item IDs for cleanup
+        if (event.response?.output) {
+          for (const output of event.response.output) {
+            if (output.id) {
+              conversationItemIdsRef.current.push(output.id);
+            }
+          }
+        }
+
+        // Keep last 10 items (~5 turns) for natural contextual translation, delete older ones
+        const MAX_CONVERSATION_ITEMS = 10;
+        while (conversationItemIdsRef.current.length > MAX_CONVERSATION_ITEMS) {
+          const oldId = conversationItemIdsRef.current.shift();
+          websocketRef.current?.send({ type: 'conversation.item.delete', item_id: oldId });
+        }
+
         if (isListeningRef.current) {
           updateStatus('listening', 'Listening...');
           // Process any text that accumulated while waiting for this response
@@ -357,6 +386,7 @@ export default function App() {
   const handleDisconnect = useCallback(() => {
     isResponsePendingRef.current = false;
     accumulatedTextRef.current = '';
+    conversationItemIdsRef.current = [];
     if (sentenceTimeoutRef.current) {
       clearTimeout(sentenceTimeoutRef.current);
       sentenceTimeoutRef.current = null;
@@ -393,24 +423,38 @@ export default function App() {
   // Sync audioCapture ref for hallucination detection in event handlers
   audioCaptureRef.current = audioCapture;
 
-  // Start listening
+  // Start listening (with retry on connection failure)
   const startListening = async () => {
-    updateStatus('connecting', 'Connecting...');
-    try {
-      const key = apiKey || envApiKey;
-      await websocket.connect(key);
-      const audioStarted = await audioCapture.startCapture();
-      if (!audioStarted) {
-        stopListening();
-        return;
+    const key = apiKey || envApiKey;
+    console.log('[Start] API key present:', !!key, 'length:', key?.length);
+    const MAX_RETRIES = 3;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      updateStatus('connecting', attempt > 1 ? `Retrying (${attempt}/${MAX_RETRIES})...` : 'Connecting...');
+      try {
+        console.log(`[Start] Attempt ${attempt}/${MAX_RETRIES}`);
+        await websocket.connect(key);
+        console.log('[Start] Connected successfully');
+        const audioStarted = await audioCapture.startCapture();
+        console.log('[Start] Audio capture:', audioStarted);
+        if (!audioStarted) {
+          stopListening();
+          return;
+        }
+        isListeningRef.current = true;
+        setIsListening(true);
+        audioCapture.startVisualization(setAudioLevel);
+        updateStatus('connected', 'Speak now');
+        return; // success
+      } catch (err) {
+        console.log(`[Start] Attempt ${attempt} failed:`, err?.message);
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
       }
-      isListeningRef.current = true;
-      setIsListening(true);
-      audioCapture.startVisualization(setAudioLevel);
-      updateStatus('connected', 'Speak now');
-    } catch {
-      stopListening();
     }
+    console.log('[Start] All retries failed');
+    stopListening();
   };
 
   // Stop listening
@@ -526,12 +570,16 @@ export default function App() {
     isSubtitleModeRef.current = isSubtitleMode;
   }, [isSubtitleMode]);
 
-  // Cleanup timeout on unmount
+  // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
       if (sentenceTimeoutRef.current) {
         clearTimeout(sentenceTimeoutRef.current);
         sentenceTimeoutRef.current = null;
+      }
+      if (ttsEndTimeoutRef.current) {
+        clearTimeout(ttsEndTimeoutRef.current);
+        ttsEndTimeoutRef.current = null;
       }
     };
   }, []);

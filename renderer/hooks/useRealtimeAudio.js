@@ -1,4 +1,4 @@
-import { useRef, useCallback, useMemo } from 'react';
+import { useRef, useCallback, useMemo, useEffect } from 'react';
 
 // Base64 to ArrayBuffer
 const base64ToArrayBuffer = (base64) => {
@@ -96,6 +96,8 @@ export default function useRealtimeAudio() {
     }
 
     source.onended = () => {
+      source.disconnect();
+      source.buffer = null;
       if (ctx.currentTime >= nextPlayTimeRef.current) {
         isPlayingRef.current = false;
       }
@@ -106,6 +108,7 @@ export default function useRealtimeAudio() {
 
   const stopAudio = useCallback(() => {
     if (audioElementRef.current) {
+      audioElementRef.current.pause();
       audioElementRef.current.srcObject = null;
       audioElementRef.current = null;
     }
@@ -148,6 +151,11 @@ export default function useRealtimeAudio() {
       }
     }
   }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopAudio();
+  }, [stopAudio]);
 
   return useMemo(() => ({
     playAudioChunk,
