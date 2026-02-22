@@ -16,6 +16,9 @@ import {
 // Constants
 import { isHallucination, isAssistantResponse, isRepeatedTranscription, clearRecentTranscriptions, cleanTranslation } from './constants';
 
+// Utils
+import { checkSentenceCompletion } from './utils/sentenceCheck';
+
 export default function App() {
   // Connection & Status
   const [status, setStatus] = useState('ready');
@@ -77,6 +80,7 @@ export default function App() {
   const audioCaptureRef = useRef(null);  // For hallucination detection
   const ttsEndTimeoutRef = useRef(null);
   const conversationItemIdsRef = useRef([]);  // Track item IDs for cleanup
+  const effectiveApiKeyRef = useRef(apiKey || envApiKey);
 
   // Hooks
   const { microphones, selectedMic, selectMic, error: micError } = useMicrophones();
@@ -85,6 +89,11 @@ export default function App() {
     setStatus(state);
     setStatusText(text);
   }, []);
+
+  // Keep effectiveApiKeyRef in sync
+  useEffect(() => {
+    effectiveApiKeyRef.current = apiKey || envApiKey;
+  }, [apiKey, envApiKey]);
 
   // Realtime audio playback
   const realtimeAudio = useRealtimeAudio();
@@ -162,6 +171,33 @@ export default function App() {
     websocketRef.current?.requestResponse();
   }, []);
 
+  // Adaptive timeout: short text waits longer (may be incomplete),
+  // long text flushes faster (likely a complete thought).
+  // Always forces translation without LLM check (fallback).
+  const setAdaptiveTimeout = useCallback(() => {
+    if (sentenceTimeoutRef.current) {
+      clearTimeout(sentenceTimeoutRef.current);
+      sentenceTimeoutRef.current = null;
+    }
+    const pending = accumulatedTextRef.current;
+    if (!pending) return;
+
+    const hasCJK = /[\u3131-\uD79D\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]/.test(pending);
+    const isLong = hasCJK ? pending.length >= 12 : pending.length >= 30;
+    const timeoutMs = isLong ? 1200 : 2500;
+
+    console.log(`[Waiting] ${pending.length} chars, timeout ${timeoutMs}ms`);
+    updateStatus('listening', 'Listening...');
+
+    sentenceTimeoutRef.current = setTimeout(() => {
+      if (accumulatedTextRef.current && isListeningRef.current) {
+        console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars, ${timeoutMs}ms)`);
+        updateStatus('processing', 'Translating...');
+        tryRequestResponse();
+      }
+    }, timeoutMs);
+  }, [updateStatus, tryRequestResponse]);
+
   // Handle WebSocket events
   const handleServerEvent = useCallback((event) => {
     // Debug: log important events
@@ -228,27 +264,34 @@ export default function App() {
 
             if (result.should) {
               console.log(`[Ready to translate] Reason: ${result.reason}`);
-              updateStatus('processing', 'Translating...');
-              tryRequestResponse();
+              // Lock to prevent concurrent LLM checks / translation requests
+              isResponsePendingRef.current = true;
+              const textSnapshot = accumulatedTextRef.current;
+              checkSentenceCompletion(textSnapshot, effectiveApiKeyRef.current)
+                .then((isComplete) => {
+                  // Guard: text changed while waiting for LLM
+                  if (accumulatedTextRef.current !== textSnapshot) {
+                    console.log('[LLM Check] Text changed during check, skipping');
+                    isResponsePendingRef.current = false;
+                    setAdaptiveTimeout();
+                    return;
+                  }
+                  if (isComplete) {
+                    updateStatus('processing', 'Translating...');
+                    tryRequestResponse();
+                  } else {
+                    console.log('[LLM Check] Sentence incomplete, deferring to timeout');
+                    isResponsePendingRef.current = false;
+                    setAdaptiveTimeout();
+                  }
+                })
+                .catch((err) => {
+                  console.warn('[LLM Check] Unexpected error in callback:', err);
+                  isResponsePendingRef.current = false;
+                  setAdaptiveTimeout();
+                });
             } else {
-              // Adaptive timeout: short text waits longer (may be incomplete),
-              // long text flushes faster (likely a complete thought)
-              const pending = accumulatedTextRef.current;
-              const hasCJK = /[\u3131-\uD79D\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF]/.test(pending);
-              const isLong = hasCJK ? pending.length >= 12 : pending.length >= 30;
-              const timeoutMs = isLong ? 1200 : 2500;
-
-              console.log(`[Waiting] ${pending.length} chars, timeout ${timeoutMs}ms`);
-              updateStatus('listening', 'Listening...');
-              // Set adaptive timeout as fallback
-              sentenceTimeoutRef.current = setTimeout(() => {
-                // Check if still listening before processing
-                if (accumulatedTextRef.current && isListeningRef.current) {
-                  console.log(`[Timeout] Forcing response (${accumulatedTextRef.current.length} chars, ${timeoutMs}ms)`);
-                  updateStatus('processing', 'Translating...');
-                  tryRequestResponse();
-                }
-              }, timeoutMs);
+              setAdaptiveTimeout();
             }
           }
         } catch (err) {
@@ -364,8 +407,8 @@ export default function App() {
           }
         }
 
-        // Keep last 10 items (~5 turns) for natural contextual translation, delete older ones
-        const MAX_CONVERSATION_ITEMS = 10;
+        // Keep last 20 items (~10 turns) for natural contextual translation, delete older ones
+        const MAX_CONVERSATION_ITEMS = 20;
         while (conversationItemIdsRef.current.length > MAX_CONVERSATION_ITEMS) {
           const oldId = conversationItemIdsRef.current.shift();
           websocketRef.current?.send({ type: 'conversation.item.delete', item_id: oldId });
@@ -378,8 +421,30 @@ export default function App() {
             const pendingResult = shouldRequestTranslation(accumulatedTextRef.current);
             if (pendingResult.should) {
               console.log('[Response Done] Processing pending accumulated text:', accumulatedTextRef.current.substring(0, 50));
-              updateStatus('processing', 'Translating...');
-              tryRequestResponse();
+              isResponsePendingRef.current = true;
+              const textSnapshot = accumulatedTextRef.current;
+              checkSentenceCompletion(textSnapshot, effectiveApiKeyRef.current)
+                .then((isComplete) => {
+                  if (accumulatedTextRef.current !== textSnapshot) {
+                    console.log('[LLM Check] Text changed during check, skipping');
+                    isResponsePendingRef.current = false;
+                    setAdaptiveTimeout();
+                    return;
+                  }
+                  if (isComplete) {
+                    updateStatus('processing', 'Translating...');
+                    tryRequestResponse();
+                  } else {
+                    console.log('[LLM Check] Pending text incomplete, deferring to timeout');
+                    isResponsePendingRef.current = false;
+                    setAdaptiveTimeout();
+                  }
+                })
+                .catch((err) => {
+                  console.warn('[LLM Check] Unexpected error in callback:', err);
+                  isResponsePendingRef.current = false;
+                  setAdaptiveTimeout();
+                });
             }
           }
         } else {
@@ -392,7 +457,7 @@ export default function App() {
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, realtimeAudio, subtitle, shouldRequestTranslation, tryRequestResponse]);
+  }, [updateStatus, realtimeAudio, subtitle, shouldRequestTranslation, tryRequestResponse, setAdaptiveTimeout]);
 
   // Handle WebSocket disconnect - reset pending states
   const handleDisconnect = useCallback(() => {
