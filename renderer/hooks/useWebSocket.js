@@ -72,7 +72,7 @@ export default function useWebSocket({
       }, CONNECTION_TIMEOUT_MS);
 
       const ws = new WebSocket(
-        'wss://api.openai.com/v1/realtime?model=gpt-realtime',
+        'wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5',
         ['realtime', `openai-insecure-api-key.${apiKey}`, 'openai-beta.realtime-v1']
       );
 
