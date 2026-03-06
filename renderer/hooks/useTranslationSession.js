@@ -101,8 +101,9 @@ export default function useTranslationSession({
           currentTranslationRef.current = newText;
           // Strip JSON wrapper for display
           let displayText = newText;
-          if (displayText.startsWith('{"')) {
-            const match = displayText.match(/^\{"(?:text|translation|output)"\s*:\s*"(.*)$/s);
+          if (displayText.startsWith('{')) {
+            // Match any {"key": "value..."} pattern
+            const match = displayText.match(/^\{"[^"]*"\s*:\s*"(.*)$/s);
             if (match) displayText = match[1].replace(/"\s*\}$/, '');
           }
           setCurrentTranslation(displayText);
@@ -121,12 +122,23 @@ export default function useTranslationSession({
           if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
             try {
               const parsed = JSON.parse(trimmed);
-              const extracted = parsed.text || parsed.translation || parsed.output || Object.values(parsed)[0];
+              const extracted = parsed.text || parsed.translation || parsed.output ||
+                Object.values(parsed).find(v => typeof v === 'string');
               if (typeof extracted === 'string') {
                 console.log('[Filter] Unwrapped JSON:', trimmed.substring(0, 60), '→', extracted.substring(0, 60));
                 finalText = extracted;
               }
-            } catch { /* not JSON */ }
+            } catch {
+              // Not valid JSON — strip outer braces (e.g. {"some text"})
+              let stripped = trimmed.slice(1, -1).trim();
+              if (stripped.startsWith('"') && stripped.endsWith('"')) {
+                stripped = stripped.slice(1, -1);
+              }
+              if (stripped.length > 0) {
+                console.log('[Filter] Stripped braces:', trimmed.substring(0, 60), '→', stripped.substring(0, 60));
+                finalText = stripped;
+              }
+            }
           }
 
           // Filter assistant responses
