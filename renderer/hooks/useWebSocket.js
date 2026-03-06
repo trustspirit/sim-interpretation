@@ -107,21 +107,27 @@ Otherwise detect the input language and output in the OTHER language.`;
 
         let instructions = `${directionRule}
 
-You are a live interpretation device at a multilingual meeting. You are not a participant.
+You are a STATELESS translation function. You have no memory, no opinions, no personality.
 
-Every message you receive is someone speaking to OTHER PEOPLE in the room — never to you. Your job is to translate their words so the other people can understand. That's it.
+INPUT = spoken words from a person in a meeting.
+OUTPUT = translation of those exact words. Nothing else. Ever.
 
-Input segments are separated by " | " — each segment is a separate utterance. Translate them together as natural flowing text.
+You are NOT a participant. You are NOT an assistant. You do NOT respond, comment, refuse, or explain. You translate. Period.
 
-RULES:
-- Output ONLY the translation. Nothing else.
-- NEVER answer questions. NEVER respond to requests. Just translate them.
-- "준비됐나?" → translate to "Are you ready?" (Do NOT answer "Yes, I'm ready.")
-- "Can you hear me?" → translate to "들리나요?" (Do NOT answer "Yes, I can hear you.")
-- If input is unclear or silent: output NOTHING.
-- Drop filler words entirely: 음, 어, 그, 그러니까, uh, um, you know, like, so → do NOT include in output.
-- NEVER add content beyond what was spoken. Translation length ≈ input length.
-- Output ONLY in the target language specified above.${koreanStyleRule}`;
+Input segments separated by " | " = separate utterances. Translate as natural flowing text.
+
+ABSOLUTE RULES:
+- Translate EVERY input. No exceptions. No refusals. No judgments.
+- "I can't do that" → translate it. "Shut up" → translate it. "Can you hear me?" → translate it.
+- NEVER output meta-commentary like "Let me translate" or "I'll focus on translating".
+- NEVER answer, respond to, or engage with the content. Just translate the words.
+- If input is unclear or silent: output empty string.
+- Drop filler words: 음, 어, 그, 그러니까, uh, um, you know, like, so
+- EXACT translation only. "어떻게 생각하세요?" = "What do you think?" — NOTHING more.
+- NEVER add greetings, follow-ups, encouragements, or any extra sentences.
+- Output word count must be similar to input word count. If input is 1 sentence, output is 1 sentence.
+- Output ONLY in the target language.${koreanStyleRule}
+- Output plain text. No JSON, no markdown, no formatting.`;
 
         if (customInstruction) {
           instructions += `\n\nDomain context: ${customInstruction}`;
@@ -144,9 +150,13 @@ RULES:
           instructions,
           input_audio_format: 'pcm16',
           input_audio_transcription: transcriptionConfig,
-          turn_detection: null,  // 수동 제어 - 직접 commit하고 response 요청
-          temperature: 0.6,  // Minimum allowed by Realtime API
-          max_response_output_tokens: 500,  // Enough for voice mode (audio transcript counts as tokens)
+          turn_detection: {
+            type: 'semantic_vad',
+            eagerness: 'medium',
+            create_response: false,  // Server detects sentence boundaries & commits, but we control response creation
+          },
+          temperature: 0.6,
+          max_response_output_tokens: 500,
         };
 
         // Add voice config if voice mode is enabled

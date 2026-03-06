@@ -1,9 +1,6 @@
 import { useRef, useCallback } from 'react';
 
-// Audio detection thresholds (tuned for translation quality)
-const SILENCE_THRESHOLD = 0.06;      // Higher = less noise triggers (was 0.04)
-const SILENCE_DURATION_MS = 600;     // Wait 600ms of silence before commit (complete sentences)
-const MIN_SPEECH_DURATION_MS = 600;  // Ignore speech shorter than 600ms (was 400ms, reduce noise/hallucination)
+const SPEECH_THRESHOLD = 0.06;
 
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
@@ -18,7 +15,6 @@ const arrayBufferToBase64 = (buffer) => {
 export default function useAudioCapture({
   selectedMic,
   onAudioData,
-  onCommit,
   onError
 }) {
   const audioContextRef = useRef(null);
@@ -29,21 +25,14 @@ export default function useAudioCapture({
 
   const isActiveRef = useRef(false);
   const audioLevelRef = useRef(0);
-  const captureIdRef = useRef(0); // Track capture session to handle race conditions
+  const captureIdRef = useRef(0);
 
-  // Silence detection refs
+  // Speech tracking for hallucination detection
   const isSpeakingRef = useRef(false);
-  const silenceStartRef = useRef(null);
-  const speechStartRef = useRef(null);
-  const lastSpeechEndRef = useRef(0); // Track when speech last ended (for hallucination detection)
-  const hasAudioToCommitRef = useRef(false); // Track if audio has been sent since last commit
-  const lastBufferClearRef = useRef(0);      // Track last buffer clear time
-  const preBufferRef = useRef([]);           // Pre-buffer to capture speech onset
-  const PRE_BUFFER_SIZE = 3;                 // Keep last 3 chunks (~300ms) for speech onset (Korean initial consonants)
+  const lastSpeechEndRef = useRef(0);
 
   const startCapture = useCallback(async () => {
     try {
-      // Increment capture ID to invalidate any in-flight async operations
       const currentCaptureId = ++captureIdRef.current;
       isActiveRef.current = true;
 
@@ -54,19 +43,17 @@ export default function useAudioCapture({
             deviceId: selectedMic ? { exact: selectedMic } : undefined,
             echoCancellation: true,
             noiseSuppression: true,
-            autoGainControl: false,  // AGC causes gain-pumping artifacts that confuse Whisper
-            channelCount: 1,         // Force mono — consistent input for transcription
+            autoGainControl: false,
+            channelCount: 1,
           }
         });
       } catch {
-        // Selected mic not found — fallback to default mic
         console.log('[Audio] Selected mic failed, falling back to default');
         stream = await navigator.mediaDevices.getUserMedia({
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 }
         });
       }
 
-      // Check if this capture session is still valid
       if (currentCaptureId !== captureIdRef.current) {
         stream.getTracks().forEach(t => t.stop());
         return false;
@@ -74,10 +61,8 @@ export default function useAudioCapture({
 
       mediaStreamRef.current = stream;
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-
       await audioContextRef.current.audioWorklet.addModule('audio-processor.js');
 
-      // Check again after async operation
       if (currentCaptureId !== captureIdRef.current) {
         audioContextRef.current.close();
         stream.getTracks().forEach(t => t.stop());
@@ -89,28 +74,12 @@ export default function useAudioCapture({
       analyserRef.current.fftSize = 256;
       source.connect(analyserRef.current);
 
+      // Send ALL audio to server — no gating
       const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       worklet.port.onmessage = (event) => {
         if (event.data.type === 'audio' && isActiveRef.current && currentCaptureId === captureIdRef.current) {
           const base64Audio = arrayBufferToBase64(event.data.buffer);
-
-          if (isSpeakingRef.current) {
-            // Speaking: flush pre-buffer first (captures speech onset), then send live
-            if (preBufferRef.current.length > 0) {
-              for (const buffered of preBufferRef.current) {
-                onAudioData?.(buffered);
-              }
-              preBufferRef.current = [];
-            }
-            hasAudioToCommitRef.current = true;
-            onAudioData?.(base64Audio);
-          } else {
-            // Silent: buffer locally, don't send to server
-            preBufferRef.current.push(base64Audio);
-            if (preBufferRef.current.length > PRE_BUFFER_SIZE) {
-              preBufferRef.current.shift();
-            }
-          }
+          onAudioData?.(base64Audio);
         }
       };
       source.connect(worklet);
@@ -127,17 +96,12 @@ export default function useAudioCapture({
     isActiveRef.current = false;
     audioLevelRef.current = 0;
     isSpeakingRef.current = false;
-    silenceStartRef.current = null;
-    speechStartRef.current = null;
-    hasAudioToCommitRef.current = false;
-    preBufferRef.current = [];
 
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);
       animationIdRef.current = null;
     }
 
-    // Clean up AudioWorkletNode message handler to prevent memory leak
     if (audioWorkletNodeRef.current?.port) {
       audioWorkletNodeRef.current.port.onmessage = null;
     }
@@ -153,6 +117,7 @@ export default function useAudioCapture({
     mediaStreamRef.current = null;
   }, []);
 
+  // Visualization + speech tracking (commit is handled by server semantic_vad)
   const visualize = useCallback((onLevelChange) => {
     if (!analyserRef.current || !isActiveRef.current) return 0;
 
@@ -169,34 +134,16 @@ export default function useAudioCapture({
     audioLevelRef.current = level;
     onLevelChange?.(level);
 
-    // Silence detection for commit
-    const now = Date.now();
-    if (level > SILENCE_THRESHOLD) {
-      if (!isSpeakingRef.current) {
-        isSpeakingRef.current = true;
-        speechStartRef.current = now;
-      }
-      silenceStartRef.current = null;
+    if (level > SPEECH_THRESHOLD) {
+      isSpeakingRef.current = true;
     } else if (isSpeakingRef.current) {
-      if (!silenceStartRef.current) {
-        silenceStartRef.current = now;
-      } else if (now - silenceStartRef.current > SILENCE_DURATION_MS) {
-        const speechDuration = silenceStartRef.current - speechStartRef.current;
-        isSpeakingRef.current = false;
-        lastSpeechEndRef.current = now; // Track when speech ended
-        silenceStartRef.current = null;
-        speechStartRef.current = null;
-        if (speechDuration >= MIN_SPEECH_DURATION_MS && hasAudioToCommitRef.current) {
-          console.log(`[VAD] Silence detected after ${speechDuration}ms of speech, triggering commit`);
-          hasAudioToCommitRef.current = false; // Reset after commit
-          onCommit?.();
-        }
-      }
+      isSpeakingRef.current = false;
+      lastSpeechEndRef.current = Date.now();
     }
 
     animationIdRef.current = requestAnimationFrame(() => visualize(onLevelChange));
     return level;
-  }, [onCommit]);
+  }, []);
 
   const startVisualization = useCallback((onLevelChange) => {
     if (analyserRef.current && isActiveRef.current) {
@@ -210,11 +157,10 @@ export default function useAudioCapture({
     startVisualization,
     isActive: () => isActiveRef.current,
     getAudioLevel: () => audioLevelRef.current,
-    // For hallucination detection
     isSpeaking: () => isSpeakingRef.current,
     hadRecentSpeech: (thresholdMs = 3000) => {
-      if (isSpeakingRef.current) return true; // Currently speaking
-      if (lastSpeechEndRef.current === 0) return false; // Never spoke
+      if (isSpeakingRef.current) return true;
+      if (lastSpeechEndRef.current === 0) return false;
       return (Date.now() - lastSpeechEndRef.current) < thresholdMs;
     },
   };
