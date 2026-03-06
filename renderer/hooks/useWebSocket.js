@@ -153,7 +153,8 @@ ABSOLUTE RULES:
           turn_detection: {
             type: 'semantic_vad',
             eagerness: 'medium',
-            create_response: false,  // Server detects sentence boundaries & commits, but we control response creation
+            create_response: false,     // We control response creation via our queue system
+            interrupt_response: false,  // Never interrupt ongoing translation — new input queues instead
           },
           temperature: 0.6,
           max_response_output_tokens: 500,

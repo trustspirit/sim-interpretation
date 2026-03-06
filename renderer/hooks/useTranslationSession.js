@@ -102,9 +102,14 @@ export default function useTranslationSession({
           // Strip JSON wrapper for display
           let displayText = newText;
           if (displayText.startsWith('{')) {
-            // Match any {"key": "value..."} pattern
-            const match = displayText.match(/^\{"[^"]*"\s*:\s*"(.*)$/s);
-            if (match) displayText = match[1].replace(/"\s*\}$/, '');
+            // Try to extract content from {"key": "value..."} pattern
+            const match = displayText.match(/^\{[^"]*"[^"]*"\s*:\s*"(.*)$/s);
+            if (match) {
+              displayText = match[1].replace(/"\s*\}$/, '');
+            } else if (displayText.length < 30) {
+              // JSON prefix still incomplete — don't show partial JSON to user
+              displayText = '';
+            }
           }
           setCurrentTranslation(displayText);
         }
