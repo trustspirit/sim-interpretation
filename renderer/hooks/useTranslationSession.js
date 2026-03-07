@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation, stripSourcePrefix, isLikelyEcho } from '../constants';
+import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation, stripSourcePrefix, isLikelyEcho, getLanguageName } from '../constants';
 
 export default function useTranslationSession({
   websocketRef,
@@ -16,6 +16,8 @@ export default function useTranslationSession({
   langA,
   langB,
   direction,
+  apiKey,
+  customInstruction,
 }) {
   // Transcription & Translation state
   const [originalText, setOriginalText] = useState([]);
@@ -28,10 +30,75 @@ export default function useTranslationSession({
 
   // Response management refs
   const recentTranslationsRef = useRef([]);
-  const conversationItemIdsRef = useRef([]);
-  const isResponsePendingRef = useRef(false);
-  const pendingCommitRef = useRef(false);
-  const itemsInResponseRef = useRef([]);
+  const audioItemIdsRef = useRef([]);  // Track audio items to delete after transcription
+  const translationCounterRef = useRef(0);
+
+  // Build translation system prompt
+  const getTranslationPrompt = useCallback(() => {
+    let directionRule;
+    if (direction === 'a-to-b') {
+      directionRule = `Translate ${getLanguageName(langA)} to ${getLanguageName(langB)}. Output ONLY in ${getLanguageName(langB)}.`;
+    } else if (direction === 'b-to-a') {
+      directionRule = `Translate ${getLanguageName(langB)} to ${getLanguageName(langA)}. Output ONLY in ${getLanguageName(langA)}.`;
+    } else {
+      directionRule = `Translate between ${getLanguageName(langA)} and ${getLanguageName(langB)}. Detect the input language and output in the OTHER language.`;
+    }
+    let prompt = `${directionRule}\n${customInstruction ? `DOMAIN: ${customInstruction}\n` : ''}Translate exactly. No commentary. Output ONLY the translation in plain text.`;
+    return prompt;
+  }, [langA, langB, direction, customInstruction]);
+
+  // Send text for translation via Chat Completions API (parallel, non-blocking)
+  const sendForTranslation = useCallback(async (text) => {
+    if (!text.trim() || !apiKey) return;
+
+    const orderIndex = ++translationCounterRef.current;
+    console.log('[Translation] #' + orderIndex, 'Requesting for:', text.substring(0, 80));
+
+    try {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: getTranslationPrompt() },
+            { role: 'user', content: text },
+          ],
+          temperature: 0.3,
+          max_tokens: 500,
+        }),
+      });
+
+      const data = await response.json();
+      let translated = data.choices?.[0]?.message?.content?.trim();
+      if (!translated) return;
+
+      console.log('[Translation] #' + orderIndex, 'Result:', translated.substring(0, 80));
+
+      // Apply filters
+      if (isAssistantResponse(translated)) return;
+      translated = cleanTranslation(translated);
+      translated = stripSourcePrefix(translated);
+      if (!translated?.trim()) return;
+      if (isLikelyEcho(translated, text, direction, langA, langB)) return;
+
+      // Duplicate check
+      const normalized = translated.trim().toLowerCase();
+      if (recentTranslationsRef.current.some(r => r === normalized)) return;
+      recentTranslationsRef.current.push(normalized);
+      if (recentTranslationsRef.current.length > 5) recentTranslationsRef.current.shift();
+
+      setTranslatedText(prev => {
+        const next = [...prev, translated];
+        return next.length > 50 ? next.slice(-50) : next;
+      });
+    } catch (err) {
+      console.error('[Translation] Error:', err);
+    }
+  }, [apiKey, getTranslationPrompt, langA, langB, direction]);
 
   // Handle WebSocket server events
   const handleServerEvent = useCallback((event) => {
@@ -47,17 +114,10 @@ export default function useTranslationSession({
 
     switch (event.type) {
       case 'input_audio_buffer.committed':
+        // Track audio item — will be deleted after transcription completes
         if (event.item_id) {
-          conversationItemIdsRef.current.push(event.item_id);
-        }
-        if (isResponsePendingRef.current) {
-          pendingCommitRef.current = true;
-          console.log('[Committed] Queued — waiting for previous response');
-        } else {
-          isResponsePendingRef.current = true;
-          itemsInResponseRef.current = [...conversationItemIdsRef.current];
-          console.log('[Committed] Requesting response for', itemsInResponseRef.current.length, 'items');
-          websocketRef.current?.requestResponse();
+          audioItemIdsRef.current.push(event.item_id);
+          console.log('[Committed] Waiting for transcription, item:', event.item_id);
         }
         break;
 
@@ -66,140 +126,59 @@ export default function useTranslationSession({
           const transcript = event.transcript?.trim();
           console.log('[Transcription] Raw:', transcript?.substring(0, 80));
 
-          if (transcript) {
-            // Hallucination checks
-            const hadSpeech = audioCaptureRef.current?.hadRecentSpeech?.(2000) ?? true;
-            if (!hadSpeech) {
-              console.log('[Transcription] Blocked - no recent speech');
-              break;
-            }
-            if (isHallucination(transcript)) {
-              console.log('[Transcription] Blocked - hallucination:', transcript.substring(0, 50));
-              break;
-            }
-            if (isRepeatedTranscription(transcript)) {
-              console.log('[Transcription] Blocked - repeated:', transcript.substring(0, 50));
-              break;
-            }
+          // Delete only THIS audio item now that its transcription is done
+          if (event.item_id) {
+            websocketRef.current?.send({ type: 'conversation.item.delete', item_id: event.item_id });
+            audioItemIdsRef.current = audioItemIdsRef.current.filter(id => id !== event.item_id);
+          }
 
-            // Track for echo detection
-            latestOriginalRef.current = transcript;
+          if (!transcript) break;
 
-            // Show original text
-            setOriginalText(prev => {
-              const next = [...prev, transcript];
-              return next.length > 50 ? next.slice(-50) : next;
-            });
+          // Hallucination checks
+          if (isHallucination(transcript)) {
+            console.log('[Transcription] Blocked - hallucination:', transcript.substring(0, 50));
+            break;
+          }
+          if (isRepeatedTranscription(transcript)) {
+            console.log('[Transcription] Blocked - repeated:', transcript.substring(0, 50));
+            break;
+          }
+
+          // Track for echo detection
+          latestOriginalRef.current = transcript;
+
+          // Show original text
+          setOriginalText(prev => {
+            const next = [...prev, transcript];
+            return next.length > 50 ? next.slice(-50) : next;
+          });
+
+          // Split into sentences and translate each in parallel
+          const sentences = transcript.match(/[^.?!。？！]+[.?!。？！]+/g);
+          if (sentences && sentences.length > 1) {
+            console.log('[Transcription] Split into', sentences.length, 'sentences');
+            for (const sentence of sentences) {
+              const trimmed = sentence.trim();
+              if (trimmed) sendForTranslation(trimmed);
+            }
+          } else {
+            console.log('[Transcription] Sending for translation:', transcript.substring(0, 50));
+            sendForTranslation(transcript);
           }
         } catch (err) {
           console.error('[Transcription Error]', err);
         }
         break;
 
+      // Translation is now handled via fetch API — these events are only for voice mode TTS
       case 'response.text.delta':
-      case 'response.audio_transcript.delta':
-        if (event.delta) {
-          const newText = currentTranslationRef.current + event.delta;
-          if (newText.length < 50 && isAssistantResponse(newText)) {
-            console.log('[Filter] Streaming kill - assistant response:', newText.substring(0, 60));
-            currentTranslationRef.current = '';
-            setCurrentTranslation('');
-            break;
-          }
-          currentTranslationRef.current = newText;
-          // Strip JSON wrapper for display
-          let displayText = newText;
-          if (displayText.startsWith('{')) {
-            // Try to extract content from {"key": "value..."} pattern
-            const match = displayText.match(/^\{\s*"[^"]*"\s*:\s*"(.*)$/s);
-            if (match) {
-              displayText = match[1].replace(/"\s*\}$/, '');
-            } else {
-              // JSON prefix incomplete or unrecognized — hide until content is extractable
-              displayText = '';
-            }
-          }
-          setCurrentTranslation(displayText);
-        }
+      case 'response.text.done':
         break;
 
-      case 'response.text.done':
+      case 'response.audio_transcript.delta':
+        break;
+
       case 'response.audio_transcript.done':
-        if (currentTranslationRef.current) {
-          let finalText = currentTranslationRef.current;
-          currentTranslationRef.current = '';
-          setCurrentTranslation('');
-
-          // Unwrap JSON if model wrapped output
-          const trimmed = finalText.trim();
-          if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-            try {
-              const parsed = JSON.parse(trimmed);
-              const extracted = parsed.text || parsed.translation || parsed.output ||
-                Object.values(parsed).find(v => typeof v === 'string');
-              if (typeof extracted === 'string') {
-                console.log('[Filter] Unwrapped JSON:', trimmed.substring(0, 60), '→', extracted.substring(0, 60));
-                finalText = extracted;
-              }
-            } catch {
-              // Not valid JSON — strip outer braces (e.g. {"some text"})
-              let stripped = trimmed.slice(1, -1).trim();
-              if (stripped.startsWith('"') && stripped.endsWith('"')) {
-                stripped = stripped.slice(1, -1);
-              }
-              if (stripped.length > 0) {
-                console.log('[Filter] Stripped braces:', trimmed.substring(0, 60), '→', stripped.substring(0, 60));
-                finalText = stripped;
-              }
-            }
-          }
-
-          // Strip "original -> translation" format
-          const strippedText = stripSourcePrefix(finalText);
-          if (strippedText !== finalText) {
-            console.log('[Filter] Stripped source prefix:', finalText.substring(0, 80), '→', strippedText.substring(0, 80));
-            finalText = strippedText;
-          }
-
-          // Filter assistant responses
-          if (isAssistantResponse(finalText)) {
-            console.log('[Filter] Blocked assistant response:', finalText.substring(0, 50));
-            break;
-          }
-
-          // Clean trailing assistant content
-          const cleanedText = cleanTranslation(finalText);
-          if (cleanedText !== finalText) {
-            console.log('[Filter] Cleaned:', finalText.substring(0, 80), '→', cleanedText.substring(0, 80));
-            finalText = cleanedText;
-          }
-
-          if (!finalText || finalText.trim().length === 0) break;
-
-          // Echo detection: block if output is in same language as input
-          if (isLikelyEcho(finalText, latestOriginalRef.current, direction, langA, langB)) {
-            console.log('[Filter] Blocked same-language echo:', finalText.substring(0, 50));
-            break;
-          }
-
-          // Duplicate check
-          const normalizedText = finalText.trim().toLowerCase();
-          const isDuplicate = recentTranslationsRef.current.some(r => r === normalizedText);
-          if (isDuplicate) {
-            console.log('[Filter] Blocked duplicate:', finalText.substring(0, 50));
-            break;
-          }
-
-          recentTranslationsRef.current.push(normalizedText);
-          if (recentTranslationsRef.current.length > 5) {
-            recentTranslationsRef.current.shift();
-          }
-
-          setTranslatedText(prev => {
-            const next = [...prev, finalText];
-            return next.length > 50 ? next.slice(-50) : next;
-          });
-        }
         break;
 
       case 'response.audio.delta':
@@ -233,52 +212,17 @@ export default function useTranslationSession({
         break;
 
       case 'response.done':
-        {
-          const output = event.response?.output;
-          const textContent = output?.map(o => o.content?.map(c => c.text || c.transcript || '').join('')).join('') || '';
-          console.log('[Response Done]', textContent ? `"${textContent.substring(0, 80)}"` : '(empty)', 'status:', event.response?.status);
-        }
-
-        // Delete only items that were part of THIS response (not future queued ones)
-        {
-          const itemsToDelete = new Set(itemsInResponseRef.current);
-          if (event.response?.output) {
-            for (const output of event.response.output) {
-              if (output.id) itemsToDelete.add(output.id);
-            }
-          }
-          for (const id of itemsToDelete) {
-            websocketRef.current?.send({ type: 'conversation.item.delete', item_id: id });
-          }
-          // Keep only items NOT processed by this response
-          conversationItemIdsRef.current = conversationItemIdsRef.current.filter(
-            id => !itemsToDelete.has(id)
-          );
-          itemsInResponseRef.current = [];
-        }
-
-        isResponsePendingRef.current = false;
-
-        // Process queued commits
-        if (pendingCommitRef.current && conversationItemIdsRef.current.length > 0) {
-          pendingCommitRef.current = false;
-          isResponsePendingRef.current = true;
-          itemsInResponseRef.current = [...conversationItemIdsRef.current];
-          console.log('[Response Done] Processing queued items:', itemsInResponseRef.current.length);
-          websocketRef.current?.requestResponse();
-        } else {
-          pendingCommitRef.current = false;
-        }
-
-        if (isListeningRef.current) {
-          updateStatus('listening', 'Speak now');
-        } else {
-          updateStatus('connected', 'Connected');
-        }
+        console.log('[Response Done]', event.response?.status);
+        break;
         break;
 
       case 'conversation.item.input_audio_transcription.failed':
         console.error('[Transcription Failed]', event.error?.message || JSON.stringify(event));
+        // Clean up the audio item even on failure
+        if (event.item_id) {
+          websocketRef.current?.send({ type: 'conversation.item.delete', item_id: event.item_id });
+          audioItemIdsRef.current = audioItemIdsRef.current.filter(id => id !== event.item_id);
+        }
         break;
 
       case 'error':
@@ -291,14 +235,11 @@ export default function useTranslationSession({
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, isListeningRef, langA, langB, direction]);
+  }, [realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, sendForTranslation]);
 
   // Handle WebSocket disconnect — reset response pipeline state
   const handleDisconnect = useCallback(() => {
-    conversationItemIdsRef.current = [];
-    itemsInResponseRef.current = [];
-    isResponsePendingRef.current = false;
-    pendingCommitRef.current = false;
+    audioItemIdsRef.current = [];
   }, []);
 
   // Clear all transcripts
@@ -314,6 +255,7 @@ export default function useTranslationSession({
   const resetSession = useCallback(() => {
     recentTranslationsRef.current = [];
     latestOriginalRef.current = '';
+    audioItemIdsRef.current = [];
   }, []);
 
   return {

@@ -75,6 +75,8 @@ export default function App() {
     langA,
     langB,
     direction,
+    apiKey: apiKey || envApiKey,
+    customInstruction,
   });
 
   // Wire late-binding refs after both hooks are initialized
