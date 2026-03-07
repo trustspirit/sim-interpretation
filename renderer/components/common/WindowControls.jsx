@@ -5,7 +5,7 @@ export default function WindowControls() {
 
   const handleClose = () => window.electronAPI?.closeWindow?.();
   const handleMinimize = () => window.electronAPI?.minimizeWindow?.();
-  const handleMaximize = () => window.electronAPI?.maximizeWindow?.();
+  const handleFullscreen = () => window.electronAPI?.fullscreenWindow?.();
 
   return (
     <div
@@ -26,7 +26,7 @@ export default function WindowControls() {
         }`}
       />
       <button
-        onClick={handleMaximize}
+        onClick={handleFullscreen}
         className={`w-3 h-3 rounded-full transition-all duration-150 ${
           isHovered ? 'bg-[#28c840]' : 'bg-codex-muted/50'
         }`}

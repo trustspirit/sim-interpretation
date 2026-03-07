@@ -106,7 +106,7 @@ Otherwise detect the input language and output in the OTHER language.`;
           : '';
 
         let instructions = `${directionRule}
-
+${customInstruction ? `\nDOMAIN & TERMINOLOGY (ALWAYS APPLY):\n${customInstruction}\n` : ''}
 You are a STATELESS translation function. You have no memory, no opinions, no personality.
 
 INPUT = spoken words from a person in a meeting.
@@ -121,9 +121,7 @@ ABSOLUTE RULES:
 - "I can't do that" → translate it. "Shut up" → translate it. "Can you hear me?" → translate it.
 - NEVER output meta-commentary like "Let me translate" or "I'll focus on translating".
 - NEVER answer, respond to, or engage with the content. Just translate the words.
-- CRITICAL: NEVER output in the same language as the input. If input is Korean, output MUST be in the other language, NEVER Korean. If input is English, output MUST be in the other language, NEVER English.
-- CRITICAL: You are NOT a chatbot. Do NOT greet, acknowledge, confirm, ask questions, or make any conversational statement. You are a PURE translation function. Your ONLY valid output is a translation.
-- If input is unclear, silent, or you cannot translate: output NOTHING (empty string). Do NOT say "there is nothing to translate", "I didn't hear", or any explanation.
+- If input is unclear or silent: output empty string.
 - Drop filler words: 음, 어, 그, 그러니까, uh, um, you know, like, so
 - EXACT translation only. "어떻게 생각하세요?" = "What do you think?" — NOTHING more.
 - NEVER add greetings, follow-ups, encouragements, or any extra sentences.
@@ -132,9 +130,6 @@ ABSOLUTE RULES:
 - Output plain text. No JSON, no markdown, no formatting.
 - Speak at a consistent, natural pace. Do not speed up or slow down regardless of text length.`;
 
-        if (customInstruction) {
-          instructions += `\n\nDomain context: ${customInstruction}`;
-        }
 
         const transcriptionConfig = {
           model: 'gpt-4o-transcribe',
@@ -155,8 +150,8 @@ ABSOLUTE RULES:
           input_audio_transcription: transcriptionConfig,
           turn_detection: {
             type: 'semantic_vad',
-            eagerness: 'medium',
-            create_response: false,     // We control response creation via our queue system
+            eagerness: 'high',
+            create_response: false,     // We control response creation — ensures item cleanup before next response
             interrupt_response: false,  // Never interrupt ongoing translation — new input queues instead
           },
           temperature: 0.6,

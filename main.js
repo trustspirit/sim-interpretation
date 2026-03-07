@@ -88,12 +88,28 @@ async function createWindow() {
 
   mainWindow.loadFile('dist/index.html');
 
-  // Open DevTools with Cmd+Option+I (Mac) or Ctrl+Shift+I (Windows/Linux)
+  // Notify renderer of fullscreen changes
+  mainWindow.on('enter-full-screen', () => {
+    mainWindow.webContents.send('fullscreen-changed', true);
+  });
+  mainWindow.on('leave-full-screen', () => {
+    mainWindow.webContents.send('fullscreen-changed', false);
+  });
+
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // DevTools: Cmd+Option+I (Mac) or Ctrl+Shift+I (Windows/Linux)
     if ((input.meta && input.alt && input.key === 'i') ||
         (input.control && input.shift && input.key === 'I') ||
         input.key === 'F12') {
       mainWindow.webContents.toggleDevTools();
+    }
+    // Fullscreen: Cmd+Ctrl+F (Mac) or F11 (Windows/Linux)
+    if (input.key === 'F11' || (input.meta && input.control && input.key === 'f')) {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+    }
+    // Exit fullscreen with Escape
+    if (input.key === 'Escape' && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
     }
   });
 }
@@ -113,6 +129,14 @@ ipcMain.on('window-maximize', () => {
   } else {
     mainWindow?.maximize();
   }
+});
+
+ipcMain.on('window-fullscreen', () => {
+  mainWindow?.setFullScreen(!mainWindow.isFullScreen());
+});
+
+ipcMain.on('window-fullscreen-status', (event) => {
+  event.returnValue = mainWindow?.isFullScreen() ?? false;
 });
 
 ipcMain.on('open-settings', () => {

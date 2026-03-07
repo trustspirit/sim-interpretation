@@ -91,6 +91,8 @@ const normalizeQuotes = (s) => s.replace(/[\u2018\u2019\u0060\u00B4]/g, "'").rep
 export const isHallucination = (text) => {
   if (!text || text.length < 2) return true;
   if (text.startsWith('♪') || text.startsWith('[') || text.startsWith('(')) return true;
+  // Whisper internal token leakage (e.g. <|aesthetics_5|>, <|is_landscape_image|>)
+  if (/\<\|[a-z_0-9]+\|\>/.test(text)) return true;
   if (exactHallucinations.includes(text)) return true;
   if (containsHallucinations.some((h) => text.includes(h))) return true;
   if (hallucinationPatterns.some((pattern) => pattern.test(normalizeQuotes(text)))) return true;
@@ -338,6 +340,24 @@ export const isLikelyEcho = (translatedText, originalText, direction, langA, lan
     if (inputScript !== 'unknown' && inputScript !== 'other' && outputScript === inputScript) return true;
   }
   return false;
+};
+
+// Strip "original -> translation" format, keeping only the translation part
+export const stripSourcePrefix = (text) => {
+  if (!text) return text;
+  // Match patterns like: "원문" -> "translation" or 원문 → translation
+  const arrowMatch = text.match(/^.+?\s*(?:->|→|=>|：|:)\s*[""]?(.+?)[""]?\s*$/s);
+  if (arrowMatch) {
+    const before = text.substring(0, text.indexOf(arrowMatch[1]));
+    const after = arrowMatch[1];
+    // Only strip if the before part contains a different script (i.e., it's the source text)
+    const beforeScript = detectPrimaryScript(before);
+    const afterScript = detectPrimaryScript(after);
+    if (beforeScript !== 'unknown' && afterScript !== 'unknown' && beforeScript !== afterScript) {
+      return after.replace(/[""]$/,'').trim();
+    }
+  }
+  return text;
 };
 
 // Clean translation by removing trailing assistant content

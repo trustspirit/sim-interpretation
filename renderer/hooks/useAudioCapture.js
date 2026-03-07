@@ -158,7 +158,7 @@ export default function useAudioCapture({
     isActive: () => isActiveRef.current,
     getAudioLevel: () => audioLevelRef.current,
     isSpeaking: () => isSpeakingRef.current,
-    hadRecentSpeech: (thresholdMs = 3000) => {
+    hadRecentSpeech: (thresholdMs = 2000) => {
       if (isSpeakingRef.current) return true;
       if (lastSpeechEndRef.current === 0) return false;
       return (Date.now() - lastSpeechEndRef.current) < thresholdMs;

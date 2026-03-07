@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation, isLikelyEcho } from '../constants';
+import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation, stripSourcePrefix, isLikelyEcho } from '../constants';
 
 export default function useTranslationSession({
   websocketRef,
@@ -55,7 +55,6 @@ export default function useTranslationSession({
           console.log('[Committed] Queued — waiting for previous response');
         } else {
           isResponsePendingRef.current = true;
-          // Snapshot items that this response will process
           itemsInResponseRef.current = [...conversationItemIdsRef.current];
           console.log('[Committed] Requesting response for', itemsInResponseRef.current.length, 'items');
           websocketRef.current?.requestResponse();
@@ -112,11 +111,11 @@ export default function useTranslationSession({
           let displayText = newText;
           if (displayText.startsWith('{')) {
             // Try to extract content from {"key": "value..."} pattern
-            const match = displayText.match(/^\{[^"]*"[^"]*"\s*:\s*"(.*)$/s);
+            const match = displayText.match(/^\{\s*"[^"]*"\s*:\s*"(.*)$/s);
             if (match) {
               displayText = match[1].replace(/"\s*\}$/, '');
-            } else if (displayText.length < 30) {
-              // JSON prefix still incomplete — don't show partial JSON to user
+            } else {
+              // JSON prefix incomplete or unrecognized — hide until content is extractable
               displayText = '';
             }
           }
@@ -153,6 +152,13 @@ export default function useTranslationSession({
                 finalText = stripped;
               }
             }
+          }
+
+          // Strip "original -> translation" format
+          const strippedText = stripSourcePrefix(finalText);
+          if (strippedText !== finalText) {
+            console.log('[Filter] Stripped source prefix:', finalText.substring(0, 80), '→', strippedText.substring(0, 80));
+            finalText = strippedText;
           }
 
           // Filter assistant responses
@@ -276,6 +282,11 @@ export default function useTranslationSession({
         break;
 
       case 'error':
+        // Ignore cancel failures — happens when response already completed
+        if (event.error?.message?.includes('no active response')) {
+          console.log('[Server Error] Ignored: cancel after response completed');
+          break;
+        }
         console.error('[Server Error]', event.error?.message, event.error?.code);
         updateStatus('error', event.error?.message || 'Error');
         break;
