@@ -129,7 +129,8 @@ ABSOLUTE RULES:
 - NEVER add greetings, follow-ups, encouragements, or any extra sentences.
 - Output word count must be similar to input word count. If input is 1 sentence, output is 1 sentence.
 - Output ONLY in the target language.${koreanStyleRule}
-- Output plain text. No JSON, no markdown, no formatting.`;
+- Output plain text. No JSON, no markdown, no formatting.
+- Speak at a consistent, natural pace. Do not speed up or slow down regardless of text length.`;
 
         if (customInstruction) {
           instructions += `\n\nDomain context: ${customInstruction}`;
