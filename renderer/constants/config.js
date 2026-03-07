@@ -291,6 +291,55 @@ const trailingAssistantPatterns = [
   /! 네/,
 ];
 
+// Detect primary script of text (korean, japanese, chinese, latin, or other)
+export const detectPrimaryScript = (text) => {
+  if (!text) return 'unknown';
+  const cleaned = text.replace(/[\s\d\p{P}\p{S}]/gu, '');
+  if (cleaned.length === 0) return 'unknown';
+
+  const koreanChars = (cleaned.match(/[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/g) || []).length;
+  const japaneseChars = (cleaned.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
+  const cjkChars = (cleaned.match(/[\u4E00-\u9FFF\u3400-\u4DBF]/g) || []).length;
+  const latinChars = (cleaned.match(/[a-zA-Z\u00C0-\u024F]/g) || []).length;
+
+  if (koreanChars / cleaned.length > 0.3) return 'korean';
+  // Japanese: any kana present with CJK = japanese (e.g. "東京に行きます")
+  if (japaneseChars > 0 && (japaneseChars + cjkChars) / cleaned.length > 0.3) return 'japanese';
+  if (cjkChars / cleaned.length > 0.3) return 'chinese';
+  if (latinChars / cleaned.length > 0.3) return 'latin';
+  return 'other';
+};
+
+// Expected script for language codes
+const langScriptMap = {
+  ko: 'korean',
+  ja: 'japanese',
+  zh: 'chinese',
+  en: 'latin', es: 'latin', fr: 'latin', de: 'latin',
+  it: 'latin', pt: 'latin', nl: 'latin', pl: 'latin',
+  sv: 'latin', da: 'latin', no: 'latin', fi: 'latin',
+  tr: 'latin', vi: 'latin', id: 'latin', ms: 'latin',
+};
+
+// Check if translation output is likely an untranslated echo
+export const isLikelyEcho = (translatedText, originalText, direction, langA, langB) => {
+  const outputScript = detectPrimaryScript(translatedText);
+  if (outputScript === 'unknown' || outputScript === 'other') return false;
+
+  if (direction === 'a-to-b') {
+    const expectedScript = langScriptMap[langB];
+    if (expectedScript && outputScript !== expectedScript) return true;
+  } else if (direction === 'b-to-a') {
+    const expectedScript = langScriptMap[langA];
+    if (expectedScript && outputScript !== expectedScript) return true;
+  } else {
+    // Auto mode: output should differ from input script
+    const inputScript = detectPrimaryScript(originalText);
+    if (inputScript !== 'unknown' && inputScript !== 'other' && outputScript === inputScript) return true;
+  }
+  return false;
+};
+
 // Clean translation by removing trailing assistant content
 export const cleanTranslation = (text) => {
   if (!text) return text;

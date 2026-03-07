@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react';
-import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation } from '../constants';
+import { isHallucination, isAssistantResponse, isRepeatedTranscription, cleanTranslation, isLikelyEcho } from '../constants';
 
 export default function useTranslationSession({
   websocketRef,
@@ -13,12 +13,18 @@ export default function useTranslationSession({
   ttsEndTimeoutRef,
   isListeningRef,
   updateStatus,
+  langA,
+  langB,
+  direction,
 }) {
   // Transcription & Translation state
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
   const [currentTranslation, setCurrentTranslation] = useState('');
   const currentTranslationRef = useRef('');
+
+  // Track latest original transcription for echo detection
+  const latestOriginalRef = useRef('');
 
   // Response management refs
   const recentTranslationsRef = useRef([]);
@@ -76,6 +82,9 @@ export default function useTranslationSession({
               console.log('[Transcription] Blocked - repeated:', transcript.substring(0, 50));
               break;
             }
+
+            // Track for echo detection
+            latestOriginalRef.current = transcript;
 
             // Show original text
             setOriginalText(prev => {
@@ -160,6 +169,12 @@ export default function useTranslationSession({
           }
 
           if (!finalText || finalText.trim().length === 0) break;
+
+          // Echo detection: block if output is in same language as input
+          if (isLikelyEcho(finalText, latestOriginalRef.current, direction, langA, langB)) {
+            console.log('[Filter] Blocked same-language echo:', finalText.substring(0, 50));
+            break;
+          }
 
           // Duplicate check
           const normalizedText = finalText.trim().toLowerCase();
@@ -265,7 +280,7 @@ export default function useTranslationSession({
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [updateStatus, realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, isListeningRef]);
+  }, [updateStatus, realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, isListeningRef, langA, langB, direction]);
 
   // Handle WebSocket disconnect — reset response pipeline state
   const handleDisconnect = useCallback(() => {
@@ -281,11 +296,13 @@ export default function useTranslationSession({
     setTranslatedText([]);
     setCurrentTranslation('');
     currentTranslationRef.current = '';
+    latestOriginalRef.current = '';
   }, []);
 
   // Reset session-related refs (called on stop)
   const resetSession = useCallback(() => {
     recentTranslationsRef.current = [];
+    latestOriginalRef.current = '';
   }, []);
 
   return {

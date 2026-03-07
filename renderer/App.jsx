@@ -72,6 +72,9 @@ export default function App() {
     ttsEndTimeoutRef: voice.ttsEndTimeoutRef,
     isListeningRef: connection.isListeningRef,
     updateStatus: connection.updateStatus,
+    langA,
+    langB,
+    direction,
   });
 
   // Wire late-binding refs after both hooks are initialized
