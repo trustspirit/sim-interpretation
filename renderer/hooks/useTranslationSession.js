@@ -33,6 +33,13 @@ export default function useTranslationSession({
   const audioItemIdsRef = useRef([]);  // Track audio items to delete after transcription
   const translationCounterRef = useRef(0);
 
+  // Sentence buffering for forced commits
+  const sentenceBufferRef = useRef('');
+  const sentenceFlushTimeoutRef = useRef(null);
+  const forceCommitIntervalRef = useRef(null);
+  const FORCE_COMMIT_MS = 5000; // Force commit every 5 seconds
+  const SENTENCE_FLUSH_TIMEOUT_MS = 3000; // Flush incomplete sentence after 3s of silence
+
   // Build translation system prompt
   const getTranslationPrompt = useCallback(() => {
     let directionRule;
@@ -100,6 +107,69 @@ export default function useTranslationSession({
     }
   }, [apiKey, getTranslationPrompt, langA, langB, direction]);
 
+  // Check if text contains a complete sentence (ends with punctuation)
+  const extractCompleteSentences = useCallback((text) => {
+    const match = text.match(/^([\s\S]*[.?!。？！])\s*([\s\S]*)$/);
+    if (match) {
+      return { complete: match[1].trim(), remainder: match[2].trim() };
+    }
+    return { complete: null, remainder: text.trim() };
+  }, []);
+
+  // Process sentence buffer: translate complete sentences, keep remainder
+  const processSentenceBuffer = useCallback((force = false) => {
+    if (sentenceFlushTimeoutRef.current) {
+      clearTimeout(sentenceFlushTimeoutRef.current);
+      sentenceFlushTimeoutRef.current = null;
+    }
+
+    const buffer = sentenceBufferRef.current;
+    if (!buffer) return;
+
+    if (force) {
+      console.log('[Sentence] Force flush:', buffer.substring(0, 80));
+      sentenceBufferRef.current = '';
+      sendForTranslation(buffer);
+      return;
+    }
+
+    const { complete, remainder } = extractCompleteSentences(buffer);
+    if (complete) {
+      console.log('[Sentence] Complete:', complete.substring(0, 80), remainder ? '| Remainder: ' + remainder.substring(0, 40) : '');
+      sentenceBufferRef.current = remainder;
+      sendForTranslation(complete);
+    }
+
+    // Set timeout to flush remainder if no new transcription arrives
+    if (sentenceBufferRef.current) {
+      sentenceFlushTimeoutRef.current = setTimeout(() => processSentenceBuffer(true), SENTENCE_FLUSH_TIMEOUT_MS);
+    }
+  }, [sendForTranslation, extractCompleteSentences]);
+
+  // Start/stop force commit timer
+  const startForceCommitTimer = useCallback(() => {
+    if (forceCommitIntervalRef.current) clearInterval(forceCommitIntervalRef.current);
+    forceCommitIntervalRef.current = setInterval(() => {
+      if (websocketRef.current?.commitAudio?.()) {
+        console.log('[ForceCommit] Forced audio commit');
+      }
+    }, FORCE_COMMIT_MS);
+  }, [websocketRef]);
+
+  const stopForceCommitTimer = useCallback(() => {
+    if (forceCommitIntervalRef.current) {
+      clearInterval(forceCommitIntervalRef.current);
+      forceCommitIntervalRef.current = null;
+    }
+    if (sentenceBufferRef.current) {
+      processSentenceBuffer(true);
+    }
+    if (sentenceFlushTimeoutRef.current) {
+      clearTimeout(sentenceFlushTimeoutRef.current);
+      sentenceFlushTimeoutRef.current = null;
+    }
+  }, [processSentenceBuffer]);
+
   // Handle WebSocket server events
   const handleServerEvent = useCallback((event) => {
     // Debug logging
@@ -118,6 +188,13 @@ export default function useTranslationSession({
         if (event.item_id) {
           audioItemIdsRef.current.push(event.item_id);
           console.log('[Committed] Waiting for transcription, item:', event.item_id);
+        }
+        // Reset force commit timer — VAD already committed, restart countdown
+        if (forceCommitIntervalRef.current) {
+          clearInterval(forceCommitIntervalRef.current);
+          forceCommitIntervalRef.current = setInterval(() => {
+            websocketRef.current?.commitAudio?.();
+          }, FORCE_COMMIT_MS);
         }
         break;
 
@@ -147,24 +224,16 @@ export default function useTranslationSession({
           // Track for echo detection
           latestOriginalRef.current = transcript;
 
-          // Show original text
+          // Show original text immediately (so user sees input is working)
           setOriginalText(prev => {
             const next = [...prev, transcript];
             return next.length > 50 ? next.slice(-50) : next;
           });
 
-          // Split into sentences and translate each in parallel
-          const sentences = transcript.match(/[^.?!。？！]+[.?!。？！]+/g);
-          if (sentences && sentences.length > 1) {
-            console.log('[Transcription] Split into', sentences.length, 'sentences');
-            for (const sentence of sentences) {
-              const trimmed = sentence.trim();
-              if (trimmed) sendForTranslation(trimmed);
-            }
-          } else {
-            console.log('[Transcription] Sending for translation:', transcript.substring(0, 50));
-            sendForTranslation(transcript);
-          }
+          // Add to sentence buffer and check for complete sentences
+          sentenceBufferRef.current = (sentenceBufferRef.current + ' ' + transcript).trim();
+          console.log('[Sentence] Buffer:', sentenceBufferRef.current.substring(0, 80));
+          processSentenceBuffer(false);
         } catch (err) {
           console.error('[Transcription Error]', err);
         }
@@ -214,7 +283,6 @@ export default function useTranslationSession({
       case 'response.done':
         console.log('[Response Done]', event.response?.status);
         break;
-        break;
 
       case 'conversation.item.input_audio_transcription.failed':
         console.error('[Transcription Failed]', event.error?.message || JSON.stringify(event));
@@ -226,20 +294,23 @@ export default function useTranslationSession({
         break;
 
       case 'error':
-        // Ignore cancel failures — happens when response already completed
-        if (event.error?.message?.includes('no active response')) {
-          console.log('[Server Error] Ignored: cancel after response completed');
+        // Ignore harmless errors
+        if (event.error?.message?.includes('no active response') ||
+            event.error?.message?.includes('buffer too small')) {
           break;
         }
         console.error('[Server Error]', event.error?.message, event.error?.code);
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, sendForTranslation]);
+  }, [realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, processSentenceBuffer]);
 
   // Handle WebSocket disconnect — reset response pipeline state
   const handleDisconnect = useCallback(() => {
     audioItemIdsRef.current = [];
+    sentenceBufferRef.current = '';
+    // Don't stop force commit timer here — auto-reconnect will resume the session
+    // Timer is stopped only in resetSession (manual stop)
   }, []);
 
   // Clear all transcripts
@@ -256,7 +327,9 @@ export default function useTranslationSession({
     recentTranslationsRef.current = [];
     latestOriginalRef.current = '';
     audioItemIdsRef.current = [];
-  }, []);
+    sentenceBufferRef.current = '';
+    stopForceCommitTimer();
+  }, [stopForceCommitTimer]);
 
   return {
     // State
@@ -271,5 +344,7 @@ export default function useTranslationSession({
     // Actions
     clearTranscripts,
     resetSession,
+    startForceCommitTimer,
+    stopForceCommitTimer,
   };
 }

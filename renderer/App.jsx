@@ -90,6 +90,15 @@ export default function App() {
     };
   }, [translationSession.handleServerEvent, translationSession.handleDisconnect, translationSession.resetSession, voice.cleanupTTS, realtimeAudio]);
 
+  // Start/stop force commit timer based on listening state
+  useEffect(() => {
+    if (connection.isListening) {
+      translationSession.startForceCommitTimer();
+    } else {
+      translationSession.stopForceCommitTimer();
+    }
+  }, [connection.isListening, translationSession.startForceCommitTimer, translationSession.stopForceCommitTimer]);
+
   // Effects
   useEffect(() => {
     const handleSettingsClosed = () => {
