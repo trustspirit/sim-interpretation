@@ -33,6 +33,10 @@ export default function useTranslationSession({
   const audioItemIdsRef = useRef([]);  // Track audio items to delete after transcription
   const translationCounterRef = useRef(0);
 
+  // Recent transcription context for Whisper prompt
+  const recentTranscriptsRef = useRef([]);
+  const MAX_WHISPER_CONTEXT = 3; // Keep last 3 transcriptions as context
+
   // Sentence buffering for forced commits
   const sentenceBufferRef = useRef('');
   const sentenceFlushTimeoutRef = useRef(null);
@@ -224,6 +228,22 @@ export default function useTranslationSession({
           // Track for echo detection
           latestOriginalRef.current = transcript;
 
+          // Update Whisper context with recent transcriptions to reduce hallucination
+          recentTranscriptsRef.current.push(transcript);
+          if (recentTranscriptsRef.current.length > MAX_WHISPER_CONTEXT) {
+            recentTranscriptsRef.current.shift();
+          }
+          const whisperPrompt = recentTranscriptsRef.current.join(' ');
+          websocketRef.current?.send({
+            type: 'session.update',
+            session: {
+              input_audio_transcription: {
+                model: 'gpt-4o-transcribe',
+                prompt: whisperPrompt,
+              },
+            },
+          });
+
           // Show original text immediately (so user sees input is working)
           setOriginalText(prev => {
             const next = [...prev, transcript];
@@ -303,7 +323,7 @@ export default function useTranslationSession({
         updateStatus('error', event.error?.message || 'Error');
         break;
     }
-  }, [realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, processSentenceBuffer]);
+  }, [realtimeAudio, subtitle, websocketRef, audioCaptureRef, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef, processSentenceBuffer, updateStatus]);
 
   // Handle WebSocket disconnect — reset response pipeline state
   const handleDisconnect = useCallback(() => {
@@ -325,6 +345,7 @@ export default function useTranslationSession({
   // Reset session-related refs (called on stop)
   const resetSession = useCallback(() => {
     recentTranslationsRef.current = [];
+    recentTranscriptsRef.current = [];
     latestOriginalRef.current = '';
     audioItemIdsRef.current = [];
     sentenceBufferRef.current = '';
