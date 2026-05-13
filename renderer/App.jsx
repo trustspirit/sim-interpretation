@@ -95,7 +95,7 @@ export default function App() {
     engine,
     selectedMic,
     apiKey, envApiKey,
-    status, statusText, updateStatus,
+    updateStatus,
     onStop: handleStop,
   });
 
@@ -175,8 +175,7 @@ export default function App() {
         queueLength={subtitle.queue.length}
         isListening={connection.isListening}
         audioLevel={connection.audioLevel}
-        status={connection.status}
-        langA={langA}
+        status={status}
         langB={langB}
         subtitlePosition={ui.subtitlePosition}
         onToggleSubtitleMode={ui.toggleSubtitleMode}
@@ -194,8 +193,8 @@ export default function App() {
       <Header
         isListening={connection.isListening}
         audioLevel={connection.audioLevel}
-        status={connection.status}
-        statusText={connection.statusText}
+        status={status}
+        statusText={statusText}
         onSettingsClick={ui.openSettings}
       />
 

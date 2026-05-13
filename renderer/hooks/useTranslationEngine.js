@@ -45,16 +45,16 @@ export default function useTranslationEngine({
     newEngine.connect(apiKeyRef.current).catch(() => {
       onStatusChangeRef.current?.('error', 'Mode switch failed');
     });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode]);
+  }, [mode, whisper, realtimeTranslate]);
 
   const activeEngine = mode === 'whisper' ? whisper : realtimeTranslate;
 
   const connect = useCallback((apiKey) => {
     apiKeyRef.current = apiKey;
-    isConnectedRef.current = true;
-    return activeEngine.connect(apiKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return activeEngine.connect(apiKey).then((result) => {
+      isConnectedRef.current = true;
+      return result;
+    });
   }, [activeEngine]);
 
   const disconnect = useCallback(() => {

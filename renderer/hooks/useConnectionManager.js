@@ -7,8 +7,6 @@ export default function useConnectionManager({
   selectedMic,
   apiKey,
   envApiKey,
-  status,
-  statusText,
   updateStatus,
   onStop,
 }) {
@@ -72,12 +70,9 @@ export default function useConnectionManager({
   }, [apiKey, envApiKey, audioCapture, stopListening, updateStatus]);
 
   return {
-    status,
-    statusText,
     isListening,
     audioLevel,
     isListeningRef,
-    updateStatus,
     startListening,
     stopListening,
   };

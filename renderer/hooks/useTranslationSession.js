@@ -73,9 +73,7 @@ export default function useTranslationSession({
     currentTranslationRef.current = '';
   }, []);
 
-  const resetSession = useCallback(() => {
-    // Engine handles its own internal state on disconnect/stop
-  }, []);
+  const resetSession = useCallback(() => {}, []);
 
   return {
     originalText,
