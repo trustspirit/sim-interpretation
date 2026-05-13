@@ -1,19 +1,18 @@
 import { useRef, useEffect, useCallback } from 'react';
 import {
-  getLanguageName,
-  getRealtimeVoice,
   isHallucination,
   isRepeatedTranscription,
 } from '../../constants';
 
 const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 const IDLE_THRESHOLD_MS = 10 * 1000;
+const TRANSCRIPT_FLUSH_MS = 900;
 
 /**
  * Engine 2: gpt-realtime-translate
  * - Single WebSocket connection handles both STT and translation
- * - Translation arrives via response.text.delta/done (no Chat Completions call)
- * - Voice mode: same Realtime API audio output
+ * - Translation arrives via session.output_transcript.delta
+ * - Audio output arrives via session.output_audio.delta
  */
 export default function useRealtimeTranslateEngine({
   langA, langB, direction, voiceType, customInstruction, isVoiceMode,
@@ -31,8 +30,12 @@ export default function useRealtimeTranslateEngine({
   const lastActivityRef = useRef(Date.now());
   const sessionStartRef = useRef(Date.now());
 
-  // Translation streaming state
-  const currentTranslationDeltaRef = useRef('');
+  // Translation endpoint streams transcript deltas without sentence objects.
+  // Debounce them into readable chunks before adding to the transcript list.
+  const inputTranscriptBufferRef = useRef('');
+  const outputTranscriptBufferRef = useRef('');
+  const inputFlushTimeoutRef = useRef(null);
+  const outputFlushTimeoutRef = useRef(null);
 
   // Store callbacks in refs so WebSocket closures always see latest version
   const onTranscriptRef = useRef(onTranscript);
@@ -70,87 +73,96 @@ export default function useRealtimeTranslateEngine({
     return false;
   }, []);
 
-  const commitAudio = useCallback(() => send({ type: 'input_audio_buffer.commit' }), [send]);
+  const commitAudio = useCallback(() => true, []);
 
-  const buildInstructions = useCallback(() => {
-    const lA = langARef.current;
-    const lB = langBRef.current;
+  const getTargetLanguage = useCallback(() => {
     const dir = directionRef.current;
-    const customInstr = customInstructionRef.current;
+    if (dir === 'b-to-a') return langARef.current;
+    return langBRef.current;
+  }, []);
 
-    let directionRule;
-    if (dir === 'a-to-b') {
-      directionRule = `Translate ${getLanguageName(lA)} speech to ${getLanguageName(lB)}. Output ONLY in ${getLanguageName(lB)}.`;
-    } else if (dir === 'b-to-a') {
-      directionRule = `Translate ${getLanguageName(lB)} speech to ${getLanguageName(lA)}. Output ONLY in ${getLanguageName(lA)}.`;
-    } else {
-      directionRule = `Translate speech between ${getLanguageName(lA)} and ${getLanguageName(lB)}. Detect the spoken language and output ONLY in the OTHER language.`;
+  const flushInputTranscript = useCallback(() => {
+    if (inputFlushTimeoutRef.current) {
+      clearTimeout(inputFlushTimeoutRef.current);
+      inputFlushTimeoutRef.current = null;
     }
 
-    const isKoreanTarget =
-      (dir === 'a-to-b' && lB === 'ko') ||
-      (dir === 'b-to-a' && lA === 'ko') ||
-      (dir === 'auto' && (lA === 'ko' || lB === 'ko'));
-    const koreanStyleRule = isKoreanTarget
-      ? ' Use 해요체 (polite informal style, e.g. "~해요", "~이에요").'
-      : '';
+    const transcript = inputTranscriptBufferRef.current.trim();
+    inputTranscriptBufferRef.current = '';
+    if (!transcript) return;
+    if (isHallucination(transcript)) {
+      console.log('[RealtimeTranslate] Blocked hallucination:', transcript.substring(0, 50));
+      return;
+    }
+    if (isRepeatedTranscription(transcript)) {
+      console.log('[RealtimeTranslate] Blocked repeated:', transcript.substring(0, 50));
+      return;
+    }
+    console.log('[RealtimeTranslate] Input transcript:', transcript.substring(0, 80));
+    onTranscriptRef.current?.(transcript);
+  }, []);
 
-    return `${directionRule}${koreanStyleRule}
-${customInstr ? `\nDOMAIN & TERMINOLOGY:\n${customInstr}\n` : ''}
-Output ONLY the translation. No commentary, no meta-text, no explanations. Plain text only.
-Drop filler words: 음, 어, 그, uh, um, you know, like.`;
+  const flushOutputTranscript = useCallback(() => {
+    if (outputFlushTimeoutRef.current) {
+      clearTimeout(outputFlushTimeoutRef.current);
+      outputFlushTimeoutRef.current = null;
+    }
+
+    const translation = outputTranscriptBufferRef.current.trim();
+    outputTranscriptBufferRef.current = '';
+    if (!translation) return;
+    console.log('[RealtimeTranslate] Translation:', translation.substring(0, 80));
+    onTranslationRef.current?.(translation);
   }, []);
 
   const handleServerEvent = useCallback((event) => {
-    if (['error', 'session.updated'].includes(event.type)) {
+    if (['error', 'session.updated', 'session.created'].includes(event.type)) {
       console.log('[RealtimeTranslate Event]', event.type, JSON.stringify(event).substring(0, 200));
     }
 
     switch (event.type) {
-      case 'conversation.item.input_audio_transcription.completed': {
-        const transcript = event.transcript?.trim();
-        if (!transcript) break;
-        if (isHallucination(transcript)) {
-          console.log('[RealtimeTranslate] Blocked hallucination:', transcript.substring(0, 50));
-          break;
-        }
-        if (isRepeatedTranscription(transcript)) {
-          console.log('[RealtimeTranslate] Blocked repeated:', transcript.substring(0, 50));
-          break;
-        }
-        console.log('[RealtimeTranslate] Transcript:', transcript.substring(0, 80));
-        onTranscriptRef.current?.(transcript);
-        break;
-      }
-
-      case 'response.text.delta':
-        // Accumulate translation deltas
+      case 'session.input_transcript.delta':
         if (event.delta) {
-          currentTranslationDeltaRef.current += event.delta;
+          inputTranscriptBufferRef.current += event.delta;
+          if (inputFlushTimeoutRef.current) clearTimeout(inputFlushTimeoutRef.current);
+          inputFlushTimeoutRef.current = setTimeout(flushInputTranscript, TRANSCRIPT_FLUSH_MS);
         }
         break;
 
-      case 'response.text.done': {
-        const translation = (event.text || currentTranslationDeltaRef.current).trim();
-        currentTranslationDeltaRef.current = '';
-        if (translation) {
-          console.log('[RealtimeTranslate] Translation:', translation.substring(0, 80));
-          onTranslationRef.current?.(translation);
+      case 'session.input_transcript.done':
+        flushInputTranscript();
+        break;
+
+      case 'session.output_transcript.delta':
+        if (event.delta) {
+          outputTranscriptBufferRef.current += event.delta;
+          if (outputFlushTimeoutRef.current) clearTimeout(outputFlushTimeoutRef.current);
+          outputFlushTimeoutRef.current = setTimeout(flushOutputTranscript, TRANSCRIPT_FLUSH_MS);
         }
         break;
-      }
 
-      case 'response.audio.delta':
+      case 'session.output_transcript.done':
+        flushOutputTranscript();
+        break;
+
+      case 'session.output_audio.delta':
         if (event.delta) onAudioChunkRef.current?.(event.delta);
         break;
 
-      case 'response.audio.done':
+      case 'session.output_audio.done':
         onAudioDoneRef.current?.();
         break;
 
-      case 'response.done':
-        console.log('[RealtimeTranslate] Response done:', event.response?.status);
+      case 'response.done': {
+        const status = event.response?.status;
+        console.log('[RealtimeTranslate] Response done:', status);
+        if (status === 'failed') {
+          const message = event.response?.status_details?.error?.message || 'Realtime response failed';
+          console.error('[RealtimeTranslate] Response failed:', message);
+          onStatusChangeRef.current?.('error', message);
+        }
         break;
+      }
 
       case 'error':
         if (
@@ -161,7 +173,7 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
         onStatusChangeRef.current?.('error', event.error?.message || 'Error');
         break;
     }
-  }, []);
+  }, [flushInputTranscript, flushOutputTranscript]);
 
   const connect = useCallback((apiKey) => {
     return new Promise((resolve, reject) => {
@@ -196,8 +208,8 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
       }, 5000);
 
       const ws = new WebSocket(
-        'wss://api.openai.com/v1/realtime?model=gpt-realtime-translate',
-        ['realtime', `openai-insecure-api-key.${apiKey}`, 'openai-beta.realtime-v1']
+        'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate',
+        ['realtime', `openai-insecure-api-key.${apiKey}`]
       );
 
       ws.onopen = () => {
@@ -205,37 +217,22 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
         connectedOnceRef.current = true;
         onStatusChangeRef.current?.('connected', 'Connected');
 
-        const transcriptionConfig = { model: 'gpt-4o-transcribe' };
-        const dir = directionRef.current;
-        if (dir === 'a-to-b') transcriptionConfig.language = langARef.current;
-        else if (dir === 'b-to-a') transcriptionConfig.language = langBRef.current;
-        if (customInstructionRef.current) transcriptionConfig.prompt = customInstructionRef.current;
-
         const sessionConfig = {
-          modalities: isVoiceModeRef.current ? ['text', 'audio'] : ['text'],
-          instructions: buildInstructions(),
-          input_audio_format: 'pcm16',
-          input_audio_transcription: transcriptionConfig,
-          turn_detection: {
-            type: 'semantic_vad',
-            eagerness: 'high',
-            create_response: true,   // Model auto-creates translated response
-            interrupt_response: false,
+          audio: {
+            output: {
+              language: getTargetLanguage(),
+            },
           },
-          temperature: 0.6,
-          max_response_output_tokens: 500,
         };
-
-        if (isVoiceModeRef.current) {
-          sessionConfig.voice = getRealtimeVoice(voiceTypeRef.current);
-          sessionConfig.output_audio_format = 'pcm16';
-        }
 
         ws.send(JSON.stringify({ type: 'session.update', session: sessionConfig }));
 
         pingIntervalRef.current = setInterval(() => {
           if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'session.update', session: {} }));
+            wsRef.current.send(JSON.stringify({
+              type: 'session.update',
+              session: { audio: { output: { language: getTargetLanguage() } } },
+            }));
           }
         }, 30000);
 
@@ -282,7 +279,8 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
           return;
         }
 
-        currentTranslationDeltaRef.current = '';
+        flushInputTranscript();
+        flushOutputTranscript();
         onDisconnectRef.current?.();
 
         if (!isIntentionalCloseRef.current && !hasRejectedRef.current && apiKeyRef.current) {
@@ -297,7 +295,7 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
 
       wsRef.current = ws;
     });
-  }, [buildInstructions, handleServerEvent]);
+  }, [getTargetLanguage, handleServerEvent, flushInputTranscript, flushOutputTranscript]);
 
   const disconnect = useCallback(() => {
     isIntentionalCloseRef.current = true;
@@ -305,10 +303,11 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
     if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
     if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
     if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
-    currentTranslationDeltaRef.current = '';
+    flushInputTranscript();
+    flushOutputTranscript();
     wsRef.current?.close();
     wsRef.current = null;
-  }, []);
+  }, [flushInputTranscript, flushOutputTranscript]);
 
   // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
   useEffect(() => {
@@ -318,16 +317,18 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
+      if (inputFlushTimeoutRef.current) clearTimeout(inputFlushTimeoutRef.current);
+      if (outputFlushTimeoutRef.current) clearTimeout(outputFlushTimeoutRef.current);
       wsRef.current?.close();
     };
   }, []);
 
   const sendAudio = useCallback((base64Audio) => {
     lastActivityRef.current = Date.now();
-    return send({ type: 'input_audio_buffer.append', audio: base64Audio });
+    return send({ type: 'session.input_audio_buffer.append', audio: base64Audio });
   }, [send]);
 
-  // No-op for Realtime Translate (model handles timing via VAD + create_response: true)
+  // No-op for Realtime Translate. The translation session consumes continuous audio.
   const startForceCommitTimer = useCallback(() => {}, []);
   const stopForceCommitTimer = useCallback(() => {}, []);
 
