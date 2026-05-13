@@ -1,6 +1,5 @@
 export { default as useAudioCapture } from './useAudioCapture';
 export { default as useRealtimeAudio } from './useRealtimeAudio';
-export { default as useWebSocket } from './useWebSocket';
 export { default as useSubtitle } from './useSubtitle';
 export { default as useMicrophones } from './useMicrophones';
 export { default as useAudioOutputs } from './useAudioOutputs';
@@ -8,3 +7,4 @@ export { default as useTranslationSession } from './useTranslationSession';
 export { default as useConnectionManager } from './useConnectionManager';
 export { default as useVoiceMode } from './useVoiceMode';
 export { default as useUISettings } from './useUISettings';
+export { default as useTranslationEngine } from './useTranslationEngine';

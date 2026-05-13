@@ -12,7 +12,8 @@ import {
   Eye,
   EyeOff,
   MessageSquare,
-  MessageSquareOff
+  MessageSquareOff,
+  Zap,
 } from 'lucide-react';
 import { VoiceSelector } from '../selectors';
 
@@ -36,6 +37,8 @@ export default function ControlBar({
   showOriginalText,
   onToggleShowOriginalText,
   onClear,
+  translationMode,
+  onTranslationModeChange,
 }) {
   return (
     <div className="flex items-center gap-2">
@@ -57,6 +60,20 @@ export default function ControlBar({
           <span>Stop</span>
         </button>
       )}
+
+      {/* Translation Mode Toggle */}
+      <button
+        onClick={() => onTranslationModeChange(translationMode === 'whisper' ? 'realtime-translate' : 'whisper')}
+        className={`flex items-center gap-1.5 px-2.5 py-2 border rounded-lg transition-colors text-xs font-medium ${
+          translationMode === 'realtime-translate'
+            ? 'bg-codex-live/20 border-codex-live text-codex-live'
+            : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
+        }`}
+        title={translationMode === 'whisper' ? 'Whisper mode (click to switch to Realtime Translate)' : 'Realtime Translate mode (click to switch to Whisper)'}
+      >
+        <Zap size={13} />
+        <span>{translationMode === 'whisper' ? 'Whisper' : 'Realtime'}</span>
+      </button>
 
       {/* Font Size Controls */}
       <div className="flex items-center gap-1 bg-codex-surface border border-codex-border rounded-lg">

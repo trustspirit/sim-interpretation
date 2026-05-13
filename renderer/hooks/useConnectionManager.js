@@ -1,66 +1,29 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
-import useWebSocket from './useWebSocket';
+import { useState, useRef, useCallback } from 'react';
 import useAudioCapture from './useAudioCapture';
 import { clearRecentTranscriptions } from '../constants';
 
-// Ref-based late binding to break circular dependency with useTranslationSession
 export default function useConnectionManager({
-  langA,
-  langB,
-  direction,
-  voiceType,
-  customInstruction,
-  isVoiceMode,
+  engine,
   selectedMic,
   apiKey,
   envApiKey,
-  serverEventHandlerRef,
-  disconnectHandlerRef,
-  onStopHandlerRef,
+  status,
+  statusText,
+  updateStatus,
+  onStop,
 }) {
-  const [status, setStatus] = useState('ready');
-  const [statusText, setStatusText] = useState('Ready');
   const [isListening, setIsListening] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
-
   const isListeningRef = useRef(false);
-  const websocketRef = useRef(null);
-  const audioCaptureRef = useRef(null);
 
-  const updateStatus = useCallback((state, text) => {
-    setStatus(state);
-    setStatusText(text);
-  }, []);
-
-  const handleServerEvent = useCallback((event) => {
-    serverEventHandlerRef.current?.(event);
-  }, [serverEventHandlerRef]);
-
-  const handleDisconnect = useCallback(() => {
-    disconnectHandlerRef.current?.();
-  }, [disconnectHandlerRef]);
-
-  const websocket = useWebSocket({
-    langA,
-    langB,
-    direction,
-    voiceType,
-    customInstruction,
-    isVoiceMode,
-    onStatusChange: updateStatus,
-    onServerEvent: handleServerEvent,
-    onDisconnect: handleDisconnect,
-  });
-
-  useEffect(() => { websocketRef.current = websocket; }, [websocket]);
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
 
   const audioCapture = useAudioCapture({
     selectedMic,
-    onAudioData: (base64Audio) => websocket.sendAudio(base64Audio),
+    onAudioData: (base64Audio) => engineRef.current.sendAudio(base64Audio),
     onError: (msg) => updateStatus('error', msg),
   });
-
-  useEffect(() => { audioCaptureRef.current = audioCapture; }, [audioCapture]);
 
   const stopListening = useCallback(() => {
     isListeningRef.current = false;
@@ -68,10 +31,11 @@ export default function useConnectionManager({
     setAudioLevel(0);
     clearRecentTranscriptions();
     audioCapture.stopCapture();
-    websocket.disconnect();
-    onStopHandlerRef.current?.();
+    engineRef.current.stopForceCommitTimer?.();
+    engineRef.current.disconnect();
+    onStop?.();
     updateStatus('ready', 'Ready');
-  }, [audioCapture, websocket, onStopHandlerRef, updateStatus]);
+  }, [audioCapture, onStop, updateStatus]);
 
   const startListening = useCallback(async () => {
     const key = apiKey || envApiKey;
@@ -82,7 +46,7 @@ export default function useConnectionManager({
       updateStatus('connecting', attempt > 1 ? `Retrying (${attempt}/${MAX_RETRIES})...` : 'Connecting...');
       try {
         console.log(`[Start] Attempt ${attempt}/${MAX_RETRIES}`);
-        await websocket.connect(key);
+        await engineRef.current.connect(key);
         console.log('[Start] Connected successfully');
         const audioStarted = await audioCapture.startCapture();
         console.log('[Start] Audio capture:', audioStarted);
@@ -93,6 +57,7 @@ export default function useConnectionManager({
         isListeningRef.current = true;
         setIsListening(true);
         audioCapture.startVisualization(setAudioLevel);
+        engineRef.current.startForceCommitTimer?.();
         updateStatus('connected', 'Speak now');
         return;
       } catch (err) {
@@ -104,7 +69,7 @@ export default function useConnectionManager({
     }
     console.log('[Start] All retries failed');
     stopListening();
-  }, [apiKey, envApiKey, websocket, audioCapture, stopListening, updateStatus]);
+  }, [apiKey, envApiKey, audioCapture, stopListening, updateStatus]);
 
   return {
     status,
@@ -112,8 +77,6 @@ export default function useConnectionManager({
     isListening,
     audioLevel,
     isListeningRef,
-    websocketRef,
-    audioCaptureRef,
     updateStatus,
     startListening,
     stopListening,

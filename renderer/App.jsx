@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 // Components
 import { Header, LanguageBar, ControlBar } from './components/layout';
@@ -6,14 +6,15 @@ import { TranslationDisplay, SubtitleMode } from './components/translation';
 
 // Hooks
 import {
-  useRealtimeAudio,
   useSubtitle,
   useMicrophones,
-  useTranslationSession,
+  useRealtimeAudio,
   useConnectionManager,
+  useTranslationSession,
   useVoiceMode,
   useUISettings,
 } from './hooks';
+import useTranslationEngine from './hooks/useTranslationEngine';
 
 // Constants
 import { getRealtimeVoice } from './constants';
@@ -29,40 +30,36 @@ export default function App() {
   const [customInstruction, setCustomInstruction] = useState(() => localStorage.getItem('translatorInstruction') || '');
   const envApiKey = window.electronAPI?.getApiKey?.() || '';
 
+  // Translation mode
+  const [translationMode, setTranslationMode] = useState(
+    () => localStorage.getItem('translatorMode') || 'whisper'
+  );
+
   // UI Settings
   const ui = useUISettings();
 
   // Voice Mode
   const voice = useVoiceMode();
 
-  // Refs
-  const serverEventHandlerRef = useRef(null);
-  const disconnectHandlerRef = useRef(null);
-  const onStopHandlerRef = useRef(null);
+  // Status state (lifted up to break circular dep between engine and connection manager)
+  const [status, setStatus] = useState('ready');
+  const [statusText, setStatusText] = useState('Ready');
+  const updateStatus = useCallback((state, text) => {
+    setStatus(state);
+    setStatusText(text);
+  }, []);
 
-  // Hooks
+  // Microphones
   const { selectedMic, selectMic } = useMicrophones();
   const realtimeAudio = useRealtimeAudio();
 
   const subtitle = useSubtitle({
     isEnabled: ui.isSubtitleMode,
-    maxCharsPerLine: ui.maxCharsPerLine
+    maxCharsPerLine: ui.maxCharsPerLine,
   });
 
-  const connection = useConnectionManager({
-    langA, langB, direction,
-    voiceType: voice.voiceType,
-    customInstruction,
-    isVoiceMode: voice.isVoiceMode,
-    selectedMic, apiKey, envApiKey,
-    serverEventHandlerRef,
-    disconnectHandlerRef,
-    onStopHandlerRef,
-  });
-
+  // Translation session — manages state and provides engine callbacks
   const translationSession = useTranslationSession({
-    websocketRef: connection.websocketRef,
-    audioCaptureRef: connection.audioCaptureRef,
     realtimeAudio,
     subtitle,
     isVoiceModeRef: voice.isVoiceModeRef,
@@ -70,34 +67,40 @@ export default function App() {
     isSpeakingTTSRef: voice.isSpeakingTTSRef,
     setIsSpeakingTTS: voice.setIsSpeakingTTS,
     ttsEndTimeoutRef: voice.ttsEndTimeoutRef,
-    isListeningRef: connection.isListeningRef,
-    updateStatus: connection.updateStatus,
-    langA,
-    langB,
-    direction,
-    apiKey: apiKey || envApiKey,
-    customInstruction,
   });
 
-  // Wire late-binding refs after both hooks are initialized
-  useEffect(() => {
-    serverEventHandlerRef.current = translationSession.handleServerEvent;
-    disconnectHandlerRef.current = translationSession.handleDisconnect;
-    onStopHandlerRef.current = () => {
+  // Translation engine — selected by mode, routes audio → transcript → translation
+  const engine = useTranslationEngine({
+    mode: translationMode,
+    langA, langB, direction,
+    voiceType: voice.voiceType,
+    customInstruction,
+    isVoiceMode: voice.isVoiceMode,
+    onTranscript: translationSession.handleTranscript,
+    onTranslation: translationSession.handleTranslation,
+    onAudioChunk: translationSession.handleAudioChunk,
+    onAudioDone: translationSession.handleAudioDone,
+    onStatusChange: updateStatus,
+    onDisconnect: translationSession.handleDisconnect,
+  });
+
+  // Connection manager — orchestrates engine + audio capture
+  const connection = useConnectionManager({
+    engine,
+    selectedMic,
+    apiKey, envApiKey,
+    status, statusText, updateStatus,
+    onStop: () => {
       translationSession.resetSession();
       voice.cleanupTTS();
       realtimeAudio.resetTiming();
-    };
-  }, [translationSession.handleServerEvent, translationSession.handleDisconnect, translationSession.resetSession, voice.cleanupTTS, realtimeAudio]);
+    },
+  });
 
-  // Start/stop force commit timer based on listening state
-  useEffect(() => {
-    if (connection.isListening) {
-      translationSession.startForceCommitTimer();
-    } else {
-      translationSession.stopForceCommitTimer();
-    }
-  }, [connection.isListening, translationSession.startForceCommitTimer, translationSession.stopForceCommitTimer]);
+  const handleTranslationModeChange = useCallback((newMode) => {
+    setTranslationMode(newMode);
+    localStorage.setItem('translatorMode', newMode);
+  }, []);
 
   // Effects
   useEffect(() => {
@@ -121,7 +124,7 @@ export default function App() {
     const sessionUpdate = voice.isVoiceMode
       ? { modalities: ['text', 'audio'], voice: getRealtimeVoice(voice.voiceType), output_audio_format: 'pcm16' }
       : { modalities: ['text'] };
-    connection.websocketRef.current?.send({ type: 'session.update', session: sessionUpdate });
+    engine.send({ type: 'session.update', session: sessionUpdate });
   }, [voice.isVoiceMode, voice.voiceType, realtimeAudio]);
 
   useEffect(() => {
@@ -238,6 +241,8 @@ export default function App() {
           showOriginalText={voice.showOriginalText}
           onToggleShowOriginalText={voice.toggleShowOriginalText}
           onClear={translationSession.clearTranscripts}
+          translationMode={translationMode}
+          onTranslationModeChange={handleTranslationModeChange}
         />
       </main>
     </div>
