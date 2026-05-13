@@ -84,17 +84,19 @@ export default function App() {
     onDisconnect: translationSession.handleDisconnect,
   });
 
+  const handleStop = useCallback(() => {
+    translationSession.resetSession();
+    voice.cleanupTTS();
+    realtimeAudio.resetTiming();
+  }, [translationSession.resetSession, voice.cleanupTTS, realtimeAudio.resetTiming]);
+
   // Connection manager — orchestrates engine + audio capture
   const connection = useConnectionManager({
     engine,
     selectedMic,
     apiKey, envApiKey,
     status, statusText, updateStatus,
-    onStop: () => {
-      translationSession.resetSession();
-      voice.cleanupTTS();
-      realtimeAudio.resetTiming();
-    },
+    onStop: handleStop,
   });
 
   const handleTranslationModeChange = useCallback((newMode) => {

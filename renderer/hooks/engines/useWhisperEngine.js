@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import {
   getLanguageName,
   getRealtimeVoice,
@@ -377,6 +377,7 @@ ABSOLUTE RULES:
       }
 
       const timeoutId = setTimeout(() => {
+        wsRef.current = null;
         ws.onopen = ws.onerror = ws.onclose = null;
         ws.close();
         reject(new Error('Connection timeout'));
@@ -462,6 +463,13 @@ ABSOLUTE RULES:
         if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
         if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
 
+        // Reject promise if closed before ever opening (e.g. disconnect() during CONNECTING)
+        if (!connectedOnceRef.current && !hasRejectedRef.current) {
+          hasRejectedRef.current = true;
+          reject(new Error('Connection closed before opening'));
+          return;
+        }
+
         audioItemIdsRef.current = [];
         sentenceBufferRef.current = '';
         onDisconnectRef.current?.();
@@ -473,8 +481,6 @@ ABSOLUTE RULES:
               onStatusChangeRef.current?.('error', 'Reconnect failed');
             });
           }, 1500);
-        } else if (!hasRejectedRef.current) {
-          onStatusChangeRef.current?.('error', 'Disconnected');
         }
       };
 
@@ -493,6 +499,20 @@ ABSOLUTE RULES:
     wsRef.current?.close();
     wsRef.current = null;
   }, [stopForceCommitTimer, _clearSessionState]);
+
+  // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
+  useEffect(() => {
+    return () => {
+      isIntentionalCloseRef.current = true;
+      apiKeyRef.current = null;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
+      if (forceCommitIntervalRef.current) clearInterval(forceCommitIntervalRef.current);
+      if (sentenceFlushTimeoutRef.current) clearTimeout(sentenceFlushTimeoutRef.current);
+      wsRef.current?.close();
+    };
+  }, []);
 
   const sendAudio = useCallback((base64Audio) => {
     lastActivityRef.current = Date.now();

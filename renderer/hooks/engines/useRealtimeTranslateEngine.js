@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import {
   getLanguageName,
   getRealtimeVoice,
@@ -189,6 +189,7 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
       }
 
       const timeoutId = setTimeout(() => {
+        wsRef.current = null;
         ws.onopen = ws.onerror = ws.onclose = null;
         ws.close();
         reject(new Error('Connection timeout'));
@@ -274,6 +275,13 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
         if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
         if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
 
+        // Reject promise if closed before ever opening (e.g. disconnect() during CONNECTING)
+        if (!connectedOnceRef.current && !hasRejectedRef.current) {
+          hasRejectedRef.current = true;
+          reject(new Error('Connection closed before opening'));
+          return;
+        }
+
         currentTranslationDeltaRef.current = '';
         onDisconnectRef.current?.();
 
@@ -284,8 +292,6 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
               onStatusChangeRef.current?.('error', 'Reconnect failed');
             });
           }, 1500);
-        } else if (!hasRejectedRef.current) {
-          onStatusChangeRef.current?.('error', 'Disconnected');
         }
       };
 
@@ -302,6 +308,18 @@ Drop filler words: 음, 어, 그, uh, um, you know, like.`;
     currentTranslationDeltaRef.current = '';
     wsRef.current?.close();
     wsRef.current = null;
+  }, []);
+
+  // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
+  useEffect(() => {
+    return () => {
+      isIntentionalCloseRef.current = true;
+      apiKeyRef.current = null;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
+      if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
+      wsRef.current?.close();
+    };
   }, []);
 
   const sendAudio = useCallback((base64Audio) => {
