@@ -70,9 +70,12 @@ export default function ControlBar({
 
       {/* Translation Mode Toggle */}
       <button
-        onClick={() => onTranslationModeChange(translationMode === 'whisper' ? 'realtime-translate' : 'whisper')}
+        onClick={() => !isConnecting && onTranslationModeChange(translationMode === 'whisper' ? 'realtime-translate' : 'whisper')}
+        disabled={isConnecting}
         aria-pressed={translationMode === 'realtime-translate'}
         className={`flex items-center gap-1.5 px-2.5 py-2 border rounded-lg transition-colors text-xs font-medium ${
+          isConnecting ? 'opacity-40 cursor-not-allowed ' : ''
+        }${
           translationMode === 'realtime-translate'
             ? 'bg-codex-live/20 border-codex-live text-codex-live'
             : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'

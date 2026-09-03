@@ -9,8 +9,7 @@ export default function useConnectionManager({
   engine,
   selectedMic,
   speechActivity,
-  apiKey,
-  envApiKey,
+  getApiKey,
   updateStatus,
   onStop,
 }) {
@@ -50,13 +49,22 @@ export default function useConnectionManager({
 
   const startListening = useCallback(async () => {
     if (isListeningRef.current || isConnectingRef.current) return;
-    const key = apiKey || envApiKey;
-    console.log('[Start] API key present:', !!key, 'length:', key?.length);
 
     const generation = ++attemptGenerationRef.current;
     const cancelled = () => generation !== attemptGenerationRef.current;
     isConnectingRef.current = true;
     setIsConnecting(true);
+    updateStatus('connecting', 'Connecting...');
+
+    const key = await getApiKey();
+    if (cancelled()) return;
+    console.log('[Start] API key present:', !!key);
+    if (!key) {
+      isConnectingRef.current = false;
+      setIsConnecting(false);
+      updateStatus('error', 'API key missing — add it in Settings');
+      return;
+    }
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       updateStatus('connecting', attempt > 1 ? `Retrying (${attempt}/${MAX_RETRIES})...` : 'Connecting...');
@@ -94,7 +102,7 @@ export default function useConnectionManager({
     console.log('[Start] All retries failed');
     stopListening();
     updateStatus('error', 'Connection failed');
-  }, [apiKey, envApiKey, audioCapture, stopListening, updateStatus]);
+  }, [getApiKey, audioCapture, stopListening, updateStatus]);
 
   return {
     isListening,

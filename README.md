@@ -2,7 +2,7 @@
 
 A desktop application for real-time speech recognition and translation. Uses OpenAI API to convert speech to text and translate it into your desired language.
 
-![Electron](https://img.shields.io/badge/Electron-28-47848F?logo=electron)
+![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)
 ![OpenAI](https://img.shields.io/badge/OpenAI-API-412991?logo=openai)
 
@@ -58,7 +58,8 @@ View translation results while watching videos or during video conferences with 
 - **Subtitle Position**: Top or bottom of screen
 - **Translation Instructions**: Add context to improve translation quality
 - **Presets**: Save frequently used instructions (2 slots)
-- **API Key**: Configure OpenAI API key
+- **API Key**: Stored encrypted with the OS keychain (Electron `safeStorage`); `.env` is the fallback
+- Languages, direction, voice, font size and text direction are remembered between runs
 
 ### Display Options
 - **Font size**: 6 levels from small to extra large
@@ -160,7 +161,7 @@ OPENAI_API_KEY=sk-your-api-key-here
 ```
 
 ### 2. In-App Settings
-Settings > API Key section
+Settings > API Key section. The key is encrypted with the OS keychain and stored under the app's user data directory; it never goes into localStorage.
 
 ## Tech Stack
 
@@ -175,7 +176,8 @@ Settings > API Key section
 
 ```
 sim-interpretation/
-├── main.js              # Electron main process
+├── main.js              # Electron main process (sandboxed renderers, IPC)
+├── main/apiKeyStore.js  # Encrypted API key storage (safeStorage)
 ├── preload.cjs          # Electron preload script
 ├── renderer/
 │   ├── App.jsx          # Main app component

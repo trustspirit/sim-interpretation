@@ -2,7 +2,11 @@ import { useState, useRef, useCallback } from 'react';
 
 export default function useVoiceMode() {
   const [isVoiceMode, setIsVoiceMode] = useState(false);
-  const [voiceType, setVoiceType] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
+  const [voiceType, setVoiceTypeState] = useState(() => localStorage.getItem('translatorVoice') || 'nova');
+  const setVoiceType = useCallback((code) => {
+    setVoiceTypeState(code);
+    localStorage.setItem('translatorVoice', code);
+  }, []);
   const [isSpeakingTTS, setIsSpeakingTTS] = useState(false);
   const isSpeakingTTSRef = useRef(false);
   const [voiceOnlyMode, setVoiceOnlyMode] = useState(() =>

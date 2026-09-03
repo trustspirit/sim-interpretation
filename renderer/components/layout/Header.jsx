@@ -15,10 +15,11 @@ export default function Header({
   const hideTimeoutRef = useRef(null);
 
   useEffect(() => {
-    window.electronAPI?.onFullscreenChanged?.((fs) => {
+    const unsubscribe = window.electronAPI?.onFullscreenChanged?.((fs) => {
       setIsFullscreen(fs);
       setHeaderVisible(!fs);
     });
+    return () => unsubscribe?.();
   }, []);
 
   const showHeader = useCallback(() => {

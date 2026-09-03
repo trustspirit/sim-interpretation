@@ -1,17 +1,27 @@
-import { app, BrowserWindow, systemPreferences, session, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, systemPreferences, session, ipcMain, screen, safeStorage } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { createApiKeyStore } from './main/apiKeyStore.js';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-let mainWindow;
-let settingsWindow;
+let mainWindow = null;
+let settingsWindow = null;
 let isSubtitleMode = false;
 let normalBounds = null; // Store normal window bounds before subtitle mode
+let apiKeyStore = null;
+
+const webPreferences = {
+  preload: path.join(__dirname, 'preload.cjs'),
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+};
 
 function createSettingsWindow() {
   if (settingsWindow) {
@@ -27,18 +37,13 @@ function createSettingsWindow() {
     frame: false,
     transparent: false,
     backgroundColor: '#0a0a0a',
-    parent: mainWindow,
+    parent: mainWindow ?? undefined,
     modal: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
+    webPreferences,
   });
 
-  settingsWindow.loadFile('dist/settings.html');
-  
+  settingsWindow.loadFile(path.join(__dirname, 'dist', 'settings.html'));
+
   settingsWindow.on('closed', () => {
     settingsWindow = null;
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -68,39 +73,36 @@ async function createWindow() {
     backgroundColor: '#00000000',
     hasShadow: true,
     icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'icon.icns' : 'icon.png'),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
+    webPreferences,
   });
 
-  // Handle permission requests from renderer
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    console.log('Permission requested:', permission);
-    callback(permission === 'media');
-  });
-
-  mainWindow.loadFile('dist/index.html');
+  mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
 
   // Notify renderer of fullscreen changes
   mainWindow.on('enter-full-screen', () => {
-    mainWindow.webContents.send('fullscreen-changed', true);
+    mainWindow?.webContents.send('fullscreen-changed', true);
   });
   mainWindow.on('leave-full-screen', () => {
-    mainWindow.webContents.send('fullscreen-changed', false);
+    mainWindow?.webContents.send('fullscreen-changed', false);
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    isSubtitleMode = false;
+    normalBounds = null;
+    if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
   });
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (!mainWindow) return;
     // DevTools: Cmd+Option+I (Mac) or Ctrl+Shift+I (Windows/Linux)
-    if ((input.meta && input.alt && input.key === 'i') ||
-        (input.control && input.shift && input.key === 'I') ||
+    if ((input.meta && input.alt && input.code === 'KeyI') ||
+        (input.control && input.shift && input.code === 'KeyI') ||
         input.key === 'F12') {
       mainWindow.webContents.toggleDevTools();
     }
     // Fullscreen: Cmd+Ctrl+F (Mac) or F11 (Windows/Linux)
-    if (input.key === 'F11' || (input.meta && input.control && input.key === 'f')) {
+    if (input.key === 'F11' || (input.meta && input.control && input.code === 'KeyF')) {
       mainWindow.setFullScreen(!mainWindow.isFullScreen());
     }
     // Exit fullscreen with Escape
@@ -110,29 +112,31 @@ async function createWindow() {
   });
 }
 
+const liveMainWindow = () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+
 // Window control handlers
 ipcMain.on('window-close', () => {
-  mainWindow?.close();
+  liveMainWindow()?.close();
 });
 
 ipcMain.on('window-minimize', () => {
-  mainWindow?.minimize();
+  liveMainWindow()?.minimize();
 });
 
 ipcMain.on('window-maximize', () => {
-  if (mainWindow?.isMaximized()) {
-    mainWindow.unmaximize();
-  } else {
-    mainWindow?.maximize();
-  }
+  const win = liveMainWindow();
+  if (!win) return;
+  if (win.isMaximized()) win.unmaximize();
+  else win.maximize();
 });
 
 ipcMain.on('window-fullscreen', () => {
-  mainWindow?.setFullScreen(!mainWindow.isFullScreen());
+  const win = liveMainWindow();
+  if (win) win.setFullScreen(!win.isFullScreen());
 });
 
 ipcMain.on('window-fullscreen-status', (event) => {
-  event.returnValue = mainWindow?.isFullScreen() ?? false;
+  event.returnValue = liveMainWindow()?.isFullScreen() ?? false;
 });
 
 ipcMain.on('open-settings', () => {
@@ -140,25 +144,38 @@ ipcMain.on('open-settings', () => {
 });
 
 ipcMain.on('toggle-devtools', () => {
-  mainWindow?.webContents.toggleDevTools();
+  liveMainWindow()?.webContents.toggleDevTools();
 });
 
 ipcMain.on('close-settings', () => {
   settingsWindow?.close();
 });
 
-// Helper function to calculate subtitle position
-function getSubtitlePosition(position, subtitleHeight) {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const bounds = primaryDisplay.bounds;
-  const workArea = primaryDisplay.workArea;
-  
+// API key: stored encrypted with safeStorage in userData, .env as fallback
+ipcMain.handle('api-key:info', () => apiKeyStore.info());
+ipcMain.handle('api-key:effective', () => apiKeyStore.getEffective());
+ipcMain.handle('api-key:set', (event, value) => {
+  try {
+    apiKeyStore.set(typeof value === 'string' ? value : '');
+    return { success: true };
+  } catch (err) {
+    console.error('[api-key] store failed:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// Helper function to calculate subtitle position on the display the window is on
+function getSubtitlePosition(win, position, subtitleHeight) {
+  const display = screen.getDisplayMatching(win.getBounds());
+  const bounds = display.bounds;
+  const workArea = display.workArea;
+
   // Check if we're likely in fullscreen mode (no dock/menubar difference or minimal)
   const isFullscreen = (bounds.height - workArea.height) < 30;
-  
+
   if (isFullscreen) {
     // Fullscreen: use full screen bounds
-    const y = position === 'top' ? 0 : bounds.height - subtitleHeight;
+    const y = position === 'top' ? bounds.y : bounds.y + bounds.height - subtitleHeight;
     return { x: bounds.x, y, width: bounds.width };
   } else {
     // Normal desktop: respect dock and menubar
@@ -169,45 +186,46 @@ function getSubtitlePosition(position, subtitleHeight) {
 
 // Subtitle mode handlers
 ipcMain.handle('toggle-subtitle-mode', (event, position) => {
-  if (!mainWindow) return { success: false };
-  
+  const win = liveMainWindow();
+  if (!win) return { success: false };
+
   const subtitleHeight = 160;
-  
+
   if (!isSubtitleMode) {
     // Enter subtitle mode
-    normalBounds = mainWindow.getBounds();
-    
-    const pos = getSubtitlePosition(position, subtitleHeight);
-    
+    normalBounds = win.getBounds();
+
+    const pos = getSubtitlePosition(win, position, subtitleHeight);
+
     // Set size constraints first
-    mainWindow.setMinimumSize(400, 60);
-    mainWindow.setMaximumSize(pos.width, subtitleHeight);
-    
+    win.setMinimumSize(400, 60);
+    win.setMaximumSize(pos.width, subtitleHeight);
+
     // Make visible on all workspaces including fullscreen apps
-    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    mainWindow.setAlwaysOnTop(true, 'screen-saver');
-    mainWindow.setHasShadow(false); // Disable shadow for transparency
-    
+    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.setHasShadow(false); // Disable shadow for transparency
+
     // Set size and position
-    mainWindow.setSize(pos.width, subtitleHeight);
-    mainWindow.setPosition(pos.x, pos.y);
-    
-    mainWindow.setResizable(true);
+    win.setSize(pos.width, subtitleHeight);
+    win.setPosition(pos.x, pos.y);
+
+    win.setResizable(true);
     isSubtitleMode = true;
-    
+
     return { success: true, isSubtitleMode: true };
   } else {
     // Exit subtitle mode - remove size constraints first
-    mainWindow.setMinimumSize(600, 500);
-    mainWindow.setMaximumSize(10000, 10000); // Large number to effectively remove limit
+    win.setMinimumSize(600, 500);
+    win.setMaximumSize(10000, 10000); // Large number to effectively remove limit
 
-    mainWindow.setVisibleOnAllWorkspaces(false);
-    mainWindow.setAlwaysOnTop(false);
-    mainWindow.setHasShadow(true); // Re-enable shadow
-    mainWindow.setResizable(true);
+    win.setVisibleOnAllWorkspaces(false);
+    win.setAlwaysOnTop(false);
+    win.setHasShadow(true); // Re-enable shadow
+    win.setResizable(true);
 
     if (normalBounds) {
-      mainWindow.setBounds(normalBounds);
+      win.setBounds(normalBounds);
     }
     isSubtitleMode = false;
 
@@ -216,13 +234,14 @@ ipcMain.handle('toggle-subtitle-mode', (event, position) => {
 });
 
 ipcMain.handle('update-subtitle-position', (event, position) => {
-  if (!mainWindow || !isSubtitleMode) return { success: false };
-  
-  const currentBounds = mainWindow.getBounds();
-  const pos = getSubtitlePosition(position, currentBounds.height);
-  
-  mainWindow.setPosition(pos.x, pos.y);
-  
+  const win = liveMainWindow();
+  if (!win || !isSubtitleMode) return { success: false };
+
+  const currentBounds = win.getBounds();
+  const pos = getSubtitlePosition(win, position, currentBounds.height);
+
+  win.setPosition(pos.x, pos.y);
+
   return { success: true };
 });
 
@@ -231,12 +250,25 @@ ipcMain.handle('get-subtitle-mode', () => {
 });
 
 app.whenReady().then(() => {
+  apiKeyStore = createApiKeyStore({
+    filePath: path.join(app.getPath('userData'), 'openai-api-key.enc'),
+    env: process.env,
+    safeStorage,
+    fs,
+  });
+
+  // Only microphone/speaker access is ever needed by the renderer
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    console.log('Permission requested:', permission);
+    callback(permission === 'media');
+  });
+
   // Set dock icon on macOS
-  if (process.platform === 'darwin') {
+  if (process.platform === 'darwin' && app.dock) {
     const iconPath = path.join(__dirname, 'assets', 'icon.png');
     app.dock.setIcon(iconPath);
   }
-  
+
   createWindow();
 });
 

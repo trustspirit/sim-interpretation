@@ -79,25 +79,37 @@ export default function Settings() {
   const [preset1, setPreset1] = useState('');
   const [preset2, setPreset2] = useState('');
   const [activePreset, setActivePreset] = useState(0);
-  const [envApiKey, setEnvApiKey] = useState('');
+  const [hasEnvKey, setHasEnvKey] = useState(false);
+  const [apiKeyError, setApiKeyError] = useState('');
   const [subtitlePosition, setSubtitlePosition] = useState('bottom');
 
   const { microphones, selectedMic, selectMic } = useMicrophones();
   const { outputs, selectedOutput, selectOutput } = useAudioOutputs();
 
   useEffect(() => {
-    setApiKey(localStorage.getItem('translatorApiKey') || '');
+    const loadApiKey = async () => {
+      // Migrate a legacy plain-text key first so it shows up in the field
+      const legacyKey = localStorage.getItem('translatorApiKey');
+      if (legacyKey) {
+        const result = await window.electronAPI?.setApiKey?.(legacyKey);
+        if (result?.success) localStorage.removeItem('translatorApiKey');
+      }
+      const info = await window.electronAPI?.getApiKeyInfo?.();
+      setApiKey(info?.storedKey || '');
+      setHasEnvKey(!!info?.hasEnvKey);
+    };
+    loadApiKey();
     setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
     setPreset1(localStorage.getItem('translatorPreset1') || '');
     setPreset2(localStorage.getItem('translatorPreset2') || '');
     setActivePreset(parseInt(localStorage.getItem('translatorActivePreset') || '0'));
-    setEnvApiKey(window.electronAPI?.getApiKey?.() || '');
     setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
   }, []);
 
-  const handleApiKeyChange = (value) => {
+  const handleApiKeyChange = async (value) => {
     setApiKey(value);
-    localStorage.setItem('translatorApiKey', value);
+    const result = await window.electronAPI?.setApiKey?.(value);
+    setApiKeyError(result?.success === false ? result.error : '');
   };
 
   const handleInstructionChange = (value) => {
@@ -253,7 +265,7 @@ export default function Settings() {
             }
             <Key size={16} className="text-codex-muted" />
             <h2 className="text-sm font-medium">API Key</h2>
-            {(apiKey || envApiKey) && !showApiSection && (
+            {(apiKey || hasEnvKey) && !showApiSection && (
               <span className="ml-auto text-xs text-codex-muted">Configured</span>
             )}
           </button>
@@ -265,7 +277,7 @@ export default function Settings() {
                   type={showApiKey ? 'text' : 'password'}
                   value={apiKey}
                   onChange={(e) => handleApiKeyChange(e.target.value)}
-                  placeholder={envApiKey ? 'Using .env file' : 'sk-...'}
+                  placeholder={hasEnvKey ? 'Using .env file' : 'sk-...'}
                   className="w-full px-3 py-2.5 pr-10 bg-codex-surface border border-codex-border rounded-lg text-sm focus:outline-none focus:border-codex-border-hover"
                 />
                 <button
@@ -276,10 +288,18 @@ export default function Settings() {
                   {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
-              {envApiKey && !apiKey && (
+              {hasEnvKey && !apiKey && (
                 <p className="mt-2 text-xs text-codex-muted">
                   Using API key from .env file
                 </p>
+              )}
+              {apiKey && !apiKeyError && (
+                <p className="mt-2 text-xs text-codex-muted">
+                  Stored encrypted with the OS keychain
+                </p>
+              )}
+              {apiKeyError && (
+                <p className="mt-2 text-xs text-codex-error">{apiKeyError}</p>
               )}
             </div>
           )}

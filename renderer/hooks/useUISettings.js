@@ -1,8 +1,13 @@
 import { useState, useRef, useCallback } from 'react';
 
 export default function useUISettings() {
-  const [fontSize, setFontSize] = useState(2);
-  const [textDirection, setTextDirection] = useState('down');
+  const [fontSize, setFontSize] = useState(() => {
+    const stored = parseInt(localStorage.getItem('translatorFontSize') ?? '', 10);
+    return Number.isInteger(stored) && stored >= 0 && stored <= 5 ? stored : 2;
+  });
+  const [textDirection, setTextDirection] = useState(() =>
+    localStorage.getItem('translatorTextDirection') === 'up' ? 'up' : 'down'
+  );
   const [isSubtitleMode, setIsSubtitleMode] = useState(false);
   const [subtitlePosition, setSubtitlePosition] = useState(() =>
     localStorage.getItem('translatorSubtitlePosition') || 'bottom'
@@ -11,16 +16,26 @@ export default function useUISettings() {
 
   const isSubtitleModeRef = useRef(false);
 
+  const updateFontSize = (compute) => setFontSize(prev => {
+    const next = compute(prev);
+    localStorage.setItem('translatorFontSize', String(next));
+    return next;
+  });
+
   const increaseFontSize = useCallback(() => {
-    setFontSize(prev => prev < 5 ? prev + 1 : prev);
+    updateFontSize(prev => (prev < 5 ? prev + 1 : prev));
   }, []);
 
   const decreaseFontSize = useCallback(() => {
-    setFontSize(prev => prev > 0 ? prev - 1 : prev);
+    updateFontSize(prev => (prev > 0 ? prev - 1 : prev));
   }, []);
 
   const toggleTextDirection = useCallback(() => {
-    setTextDirection(prev => prev === 'down' ? 'up' : 'down');
+    setTextDirection(prev => {
+      const next = prev === 'down' ? 'up' : 'down';
+      localStorage.setItem('translatorTextDirection', next);
+      return next;
+    });
   }, []);
 
   const toggleSubtitleMode = useCallback(async () => {

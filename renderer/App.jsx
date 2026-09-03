@@ -16,20 +16,31 @@ import {
 } from './hooks';
 import useTranslationEngine from './hooks/useTranslationEngine';
 import { createSpeechActivityTracker } from './utils/speechActivity';
+import { resolveLanguagePair } from './utils/languagePair';
 
 // Mic peak level (0..1) above which a chunk counts as speech
 const SPEECH_THRESHOLD = 0.06;
 
 export default function App() {
-  // Language settings
-  const [langA, setLangA] = useState('en');
-  const [langB, setLangB] = useState('ko');
+  // Language settings (persisted; A and B can never be the same language)
+  const [languagePair, setLanguagePair] = useState(() => {
+    const langA = localStorage.getItem('translatorLangA') || 'en';
+    const langB = localStorage.getItem('translatorLangB') || 'ko';
+    return langA === langB ? { langA: 'en', langB: 'ko' } : { langA, langB };
+  });
+  const { langA, langB } = languagePair;
+  const changeLanguage = useCallback((side, code) => {
+    setLanguagePair((current) => {
+      const next = resolveLanguagePair(current, side, code);
+      localStorage.setItem('translatorLangA', next.langA);
+      localStorage.setItem('translatorLangB', next.langB);
+      return next;
+    });
+  }, []);
   const [direction, setDirection] = useState(() => localStorage.getItem('translatorDirection') || 'auto');
 
-  // API & Settings
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('translatorApiKey') || '');
+  // Settings
   const [customInstruction, setCustomInstruction] = useState(() => localStorage.getItem('translatorInstruction') || '');
-  const envApiKey = window.electronAPI?.getApiKey?.() || '';
 
   // Translation mode
   const [translationMode, setTranslationMode] = useState(
@@ -51,7 +62,7 @@ export default function App() {
   }, []);
 
   // Microphones
-  const { selectedMic, selectMic } = useMicrophones();
+  const { selectedMic, selectMic } = useMicrophones({ enumerate: false });
   const realtimeAudio = useRealtimeAudio();
 
   // Shared between capture (writes) and engines (reads) to reject silence hallucinations
@@ -94,12 +105,21 @@ export default function App() {
     realtimeAudio.stopPlayback();
   }, [voice.cleanupTTS, realtimeAudio.stopPlayback]);
 
+  // API key lives encrypted in the main process; resolved fresh on every Start
+  const getApiKey = useCallback(async () => {
+    try {
+      return (await window.electronAPI?.getEffectiveApiKey?.()) || '';
+    } catch {
+      return '';
+    }
+  }, []);
+
   // Connection manager — orchestrates engine + audio capture
   const connection = useConnectionManager({
     engine,
     selectedMic,
     speechActivity,
-    apiKey, envApiKey,
+    getApiKey,
     updateStatus,
     onStop: handleStop,
   });
@@ -112,18 +132,27 @@ export default function App() {
   // Realtime Translate has no bidirectional auto mode; show what will actually happen
   const effectiveDirection = !engine.capabilities.autoDirection && direction === 'auto' ? 'a-to-b' : direction;
 
+  // One-time migration: move a plain-text key from localStorage into encrypted storage
+  useEffect(() => {
+    const legacyKey = localStorage.getItem('translatorApiKey');
+    if (!legacyKey) return;
+    window.electronAPI?.setApiKey?.(legacyKey).then((result) => {
+      if (result?.success) localStorage.removeItem('translatorApiKey');
+    });
+  }, []);
+
   // Effects
   useEffect(() => {
     const handleSettingsClosed = () => {
-      setApiKey(localStorage.getItem('translatorApiKey') || '');
       setCustomInstruction(localStorage.getItem('translatorInstruction') || '');
       selectMic(localStorage.getItem('translatorMic') || '');
       ui.setSubtitlePosition(localStorage.getItem('translatorSubtitlePosition') || 'bottom');
       setDirection(localStorage.getItem('translatorDirection') || 'auto');
       voice.setAudioOutput(localStorage.getItem('translatorAudioOutput') || '');
     };
-    window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
+    const unsubscribe = window.electronAPI?.onSettingsClosed?.(handleSettingsClosed);
     window.electronAPI?.getSubtitleMode?.().then(mode => ui.setIsSubtitleMode(mode || false));
+    return () => unsubscribe?.();
   }, [selectMic]);
 
   // Voice mode only toggles local playback; engines read isVoiceMode through refs
@@ -206,8 +235,8 @@ export default function App() {
         langB={langB}
         direction={effectiveDirection}
         autoDisabled={!engine.capabilities.autoDirection}
-        onLangAChange={setLangA}
-        onLangBChange={setLangB}
+        onLangAChange={(code) => changeLanguage('langA', code)}
+        onLangBChange={(code) => changeLanguage('langB', code)}
         onDirectionChange={setDirection}
         disabled={connection.isListening || connection.isConnecting}
       />
