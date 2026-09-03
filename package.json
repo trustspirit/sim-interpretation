@@ -1,6 +1,6 @@
 {
   "name": "realtime-translator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Real-time voice to text translator using OpenAI Realtime API",
   "main": "main.js",
