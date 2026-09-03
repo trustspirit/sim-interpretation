@@ -7,15 +7,26 @@ import {
 const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
 const IDLE_THRESHOLD_MS = 10 * 1000;
 const TRANSCRIPT_FLUSH_MS = 900;
+// A transcript arriving with no microphone energy in this window is a silence hallucination.
+const TRANSCRIPT_SPEECH_WINDOW_MS = 8000;
+
+// The translations endpoint only accepts audio.output.language (see OpenAI docs):
+// no bidirectional auto mode, no custom instructions, no voice choice.
+export const capabilities = {
+  autoDirection: false,
+  customInstruction: false,
+  voiceSelection: false,
+};
 
 /**
  * Engine 2: gpt-realtime-translate
  * - Single WebSocket connection handles both STT and translation
  * - Translation arrives via session.output_transcript.delta
  * - Audio output arrives via session.output_audio.delta
+ * - direction 'auto' is not supported by this endpoint and behaves as A → B
  */
 export default function useRealtimeTranslateEngine({
-  langA, langB, direction, voiceType, customInstruction, isVoiceMode,
+  langA, langB, direction, isVoiceMode, speechActivity,
   onTranscript, onTranslation, onAudioChunk, onAudioDone, onStatusChange, onDisconnect,
 }) {
   // WebSocket state
@@ -55,15 +66,13 @@ export default function useRealtimeTranslateEngine({
   const langARef = useRef(langA);
   const langBRef = useRef(langB);
   const directionRef = useRef(direction);
-  const voiceTypeRef = useRef(voiceType);
-  const customInstructionRef = useRef(customInstruction);
   const isVoiceModeRef = useRef(isVoiceMode);
+  const speechActivityRef = useRef(speechActivity);
   langARef.current = langA;
   langBRef.current = langB;
   directionRef.current = direction;
-  voiceTypeRef.current = voiceType;
-  customInstructionRef.current = customInstruction;
   isVoiceModeRef.current = isVoiceMode;
+  speechActivityRef.current = speechActivity;
 
   const send = useCallback((data) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -90,6 +99,11 @@ export default function useRealtimeTranslateEngine({
     const transcript = inputTranscriptBufferRef.current.trim();
     inputTranscriptBufferRef.current = '';
     if (!transcript) return;
+    const tracker = speechActivityRef.current;
+    if (tracker && !tracker.hadSpeechWithin(TRANSCRIPT_SPEECH_WINDOW_MS)) {
+      console.log('[RealtimeTranslate] Blocked (no mic activity):', transcript.substring(0, 50));
+      return;
+    }
     if (isHallucination(transcript)) {
       console.log('[RealtimeTranslate] Blocked hallucination:', transcript.substring(0, 50));
       return;
@@ -111,6 +125,11 @@ export default function useRealtimeTranslateEngine({
     const translation = outputTranscriptBufferRef.current.trim();
     outputTranscriptBufferRef.current = '';
     if (!translation) return;
+    const tracker = speechActivityRef.current;
+    if (tracker && !tracker.hadSpeechWithin(TRANSCRIPT_SPEECH_WINDOW_MS)) {
+      console.log('[RealtimeTranslate] Blocked translation (no mic activity):', translation.substring(0, 50));
+      return;
+    }
     console.log('[RealtimeTranslate] Translation:', translation.substring(0, 80));
     onTranslationRef.current?.(translation);
   }, []);
@@ -146,7 +165,7 @@ export default function useRealtimeTranslateEngine({
         break;
 
       case 'session.output_audio.delta':
-        if (event.delta) onAudioChunkRef.current?.(event.delta);
+        if (event.delta && isVoiceModeRef.current) onAudioChunkRef.current?.(event.delta);
         break;
 
       case 'session.output_audio.done':
@@ -219,9 +238,8 @@ export default function useRealtimeTranslateEngine({
 
         const sessionConfig = {
           audio: {
-            output: {
-              language: getTargetLanguage(),
-            },
+            input: { noise_reduction: { type: 'near_field' } },
+            output: { language: getTargetLanguage() },
           },
         };
 
@@ -333,6 +351,7 @@ export default function useRealtimeTranslateEngine({
   const stopForceCommitTimer = useCallback(() => {}, []);
 
   return {
+    capabilities,
     connect,
     disconnect,
     sendAudio,

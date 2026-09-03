@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 
 export default function useTranslationSession({
   realtimeAudio,
@@ -11,8 +11,6 @@ export default function useTranslationSession({
 }) {
   const [originalText, setOriginalText] = useState([]);
   const [translatedText, setTranslatedText] = useState([]);
-  const [currentTranslation, setCurrentTranslation] = useState('');
-  const currentTranslationRef = useRef('');
 
   // Called by engine when a transcript (original speech) is ready
   const handleTranscript = useCallback((text) => {
@@ -69,16 +67,11 @@ export default function useTranslationSession({
   const clearTranscripts = useCallback(() => {
     setOriginalText([]);
     setTranslatedText([]);
-    setCurrentTranslation('');
-    currentTranslationRef.current = '';
   }, []);
-
-  const resetSession = useCallback(() => {}, []);
 
   return {
     originalText,
     translatedText,
-    currentTranslation,
 
     handleTranscript,
     handleTranslation,
@@ -87,6 +80,5 @@ export default function useTranslationSession({
     handleDisconnect,
 
     clearTranscripts,
-    resetSession,
   };
 }

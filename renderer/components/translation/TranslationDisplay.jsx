@@ -4,7 +4,6 @@ import { getFontSizeClasses } from '../../constants';
 
 export default function TranslationDisplay({
   translatedText,
-  currentTranslation,
   originalText,
   fontSize,
   textDirection,
@@ -26,7 +25,7 @@ export default function TranslationDisplay({
         scrollRef.current.scrollTop = 0;
       }
     }
-  }, [translatedText, currentTranslation, textDirection]);
+  }, [translatedText, textDirection]);
 
   // Voice only mode display
   if (isVoiceMode && voiceOnlyMode) {
@@ -47,7 +46,7 @@ export default function TranslationDisplay({
   }
 
   // Empty state
-  if (translatedText.length === 0 && !currentTranslation) {
+  if (translatedText.length === 0) {
     return (
       <div className="flex-1 flex flex-col min-h-0 mb-4">
         <div 
@@ -70,17 +69,9 @@ export default function TranslationDisplay({
         className="flex-1 bg-codex-surface border border-codex-border rounded-xl p-8 overflow-y-auto flex flex-col"
       >
         {textDirection === 'down' ? (
-          <TopToBottomLayout
-            translatedText={translatedText}
-            currentTranslation={currentTranslation}
-            fontClasses={fontClasses}
-          />
+          <TopToBottomLayout translatedText={translatedText} fontClasses={fontClasses} />
         ) : (
-          <BottomToTopLayout
-            translatedText={translatedText}
-            currentTranslation={currentTranslation}
-            fontClasses={fontClasses}
-          />
+          <BottomToTopLayout translatedText={translatedText} fontClasses={fontClasses} />
         )}
       </div>
       {showOriginalText && <OriginalTextDisplay text={originalText} />}
@@ -89,13 +80,13 @@ export default function TranslationDisplay({
 }
 
 // Top to bottom layout
-function TopToBottomLayout({ translatedText, currentTranslation, fontClasses }) {
+function TopToBottomLayout({ translatedText, fontClasses }) {
   return (
     <>
       <div className="flex-1 min-h-0" />
       <div className="space-y-6 text-center">
         {translatedText.map((text, i, arr) => {
-          const isLast = i === arr.length - 1 && !currentTranslation;
+          const isLast = i === arr.length - 1;
           const opacity = isLast ? 1 : 0.4 + (i / arr.length) * 0.4;
           return (
             <p
@@ -111,12 +102,6 @@ function TopToBottomLayout({ translatedText, currentTranslation, fontClasses }) 
             </p>
           );
         })}
-        {currentTranslation && (
-          <p className={`${fontClasses.current} font-semibold leading-relaxed text-codex-text`}>
-            {currentTranslation}
-            <span className={`inline-block w-[4px] ${fontClasses.cursor} bg-codex-live ml-1.5 animate-blink`} />
-          </p>
-        )}
       </div>
       <div className="flex-1 min-h-0" />
     </>
@@ -124,19 +109,13 @@ function TopToBottomLayout({ translatedText, currentTranslation, fontClasses }) 
 }
 
 // Bottom to top layout
-function BottomToTopLayout({ translatedText, currentTranslation, fontClasses }) {
+function BottomToTopLayout({ translatedText, fontClasses }) {
   return (
     <>
       <div className="flex-1 min-h-0" />
       <div className="space-y-6 text-center">
-        {currentTranslation && (
-          <p className={`${fontClasses.current} font-semibold leading-relaxed text-codex-text`}>
-            {currentTranslation}
-            <span className={`inline-block w-[4px] ${fontClasses.cursor} bg-codex-live ml-1.5 animate-blink`} />
-          </p>
-        )}
         {[...translatedText].reverse().map((text, i, arr) => {
-          const isFirst = i === 0 && !currentTranslation;
+          const isFirst = i === 0;
           const opacity = isFirst ? 1 : 0.4 + ((arr.length - i) / arr.length) * 0.4;
           return (
             <p

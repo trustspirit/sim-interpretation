@@ -10,8 +10,15 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 
 ### Real-time Voice Translation
 - Real-time microphone input recognition
-- Speech-to-text conversion using OpenAI Whisper API
-- Natural translation using OpenAI GPT API
+- Two selectable engines (toggle in the control bar):
+  - **Standard**: Realtime API transcription (`gpt-4o-transcribe`) + Chat Completions translation. Supports Auto direction, custom instructions and voice choice.
+  - **Realtime**: single `gpt-realtime-translate` connection for transcription, translation and speech. Fixed direction only (A → B or B → A); instructions and voice choice do not apply.
+- Translations are always shown in the order the sentences were spoken
+
+### Hallucination Guards
+- Silent audio is never force-committed, and transcripts that arrive without microphone activity are dropped
+- Known Whisper artifacts and streaming outros ("thanks for watching", "구독과 좋아요…") are filtered
+- Repeated transcripts and the app's own spoken output picked up by the mic are ignored
 
 ### Supported Languages
 - English
@@ -23,12 +30,11 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 - German
 
 ### Voice Mode (Text-to-Speech)
-Listen to translations spoken aloud with OpenAI's TTS.
+Listen to translations spoken aloud. Standard mode streams `gpt-4o-mini-tts` audio over a separate HTTP request, so microphone capture and playback run in parallel without blocking each other.
 
-- **Multiple voices**: Alloy, Echo, Fable, Onyx, Nova, Shimmer
-- **Speed control**: 0.5x to 2x playback speed
+- **Multiple voices**: Alloy, Echo, Fable, Onyx, Nova, Shimmer (Standard mode)
 - **Voice-only mode**: Hide text and only hear audio output
-- Queued playback for continuous translation
+- Queued playback keeps sentences in order; Stop cuts playback immediately
 
 ### Translation Direction
 Control how languages are detected and translated.
@@ -88,6 +94,9 @@ npm run start
 # Or build and run separately
 npm run build
 npm run electron
+
+# Unit tests (filters, ordering, subtitle timing, session config)
+npm test
 ```
 
 ## Usage
@@ -104,15 +113,14 @@ npm run electron
 1. Click the speaker icon to enable voice mode
 2. When enabled, translations are read aloud automatically
 3. Additional controls appear:
-   - **Voice selector**: Choose from 6 different voices
-   - **Speed selector**: Adjust playback speed (0.5x - 2x)
+   - **Voice selector**: Choose from 6 different voices (Standard mode only)
    - **Eye icon**: Toggle voice-only mode (hides text)
 
 ### Translation Direction
 
 1. Click the direction icon (↔) between languages
 2. Choose your preferred mode:
-   - **Auto (↔)**: Detect language automatically
+   - **Auto (↔)**: Detect language automatically (Standard mode only)
    - **A → B**: Always translate from first to second language
    - **B ← A**: Always translate from second to first language
 
@@ -160,7 +168,8 @@ Settings > API Key section
 - **React**: UI framework
 - **Vite**: Build tool
 - **Tailwind CSS**: Styling
-- **OpenAI API**: Speech recognition (Whisper) + Translation (GPT) + Text-to-Speech (TTS)
+- **OpenAI API**: Realtime transcription / translation, Chat Completions, Speech (TTS)
+- **Vitest**: Unit tests for the pure translation-pipeline logic
 
 ## Project Structure
 
@@ -171,8 +180,10 @@ sim-interpretation/
 ├── renderer/
 │   ├── App.jsx          # Main app component
 │   ├── Settings.jsx     # Settings screen
+│   ├── hooks/engines/   # Standard (Whisper) and Realtime Translate engines
+│   ├── utils/           # Pure pipeline logic (ordering, chunking, filters) + tests
 │   ├── styles.css       # Global styles
-│   └── audio-processor.js  # Audio processing
+│   └── audio-processor.js  # Audio worklet: PCM16 chunks + speech level
 ├── assets/
 │   ├── icon.svg         # App icon source
 │   ├── icon.png         # PNG icon

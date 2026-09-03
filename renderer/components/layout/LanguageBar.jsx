@@ -8,6 +8,7 @@ export default function LanguageBar({
   onLangAChange, 
   onLangBChange, 
   onDirectionChange, 
+  autoDisabled = false,
   disabled 
 }) {
   return (
@@ -17,6 +18,7 @@ export default function LanguageBar({
         value={direction} 
         onChange={onDirectionChange} 
         disabled={disabled} 
+        autoDisabled={autoDisabled}
         langA={langA} 
         langB={langB} 
       />

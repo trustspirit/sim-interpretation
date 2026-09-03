@@ -59,28 +59,28 @@ export const containsHallucinations = [
   '(sighs)',
 ];
 
-// Regex patterns for common Whisper hallucinations
+// Regex patterns for common Whisper hallucinations.
+// Keep these SPECIFIC: a false positive silently deletes a real sentence from
+// the meeting, which is worse than letting an occasional outro slip through.
+// Tune this list for your domain; the tests in config.test.js pin the policy.
 const hallucinationPatterns = [
-  // Korean YouTube/streaming hallucinations
+  // Korean YouTube/streaming outros
   /구독.*좋아요/,
   /좋아요.*구독/,
-  /부탁드립니다\s*$/,
   /시청.*감사/,
   /감사.*시청/,
   /채널.*구독/,
   /구독.*채널/,
-  /알림.*설정/,
-  /좋아요.*누르/,
   /구독.*눌러/,
-  // English YouTube/streaming hallucinations
-  /subscribe/i,
-  /like and/i,
+  /알림\s*설정.*(눌러|부탁)/,
+  // English YouTube/streaming outros
+  /please subscribe/i,
+  /like and subscribe/i,
+  /subscribe to (my|our|the) channel/i,
   /thanks for watching/i,
   /thank you for watching/i,
-  /see you next/i,
-  /don't forget to/i,
   /hit the bell/i,
-  /notification/i,
+  /see you in the next (video|episode)/i,
   // Common Whisper artifacts
   /^\.+$/,  // Just dots
   /^\s*$/,  // Just whitespace
@@ -88,8 +88,12 @@ const hallucinationPatterns = [
 
 const normalizeQuotes = (s) => s.replace(/[\u2018\u2019\u0060\u00B4]/g, "'").replace(/[\u201C\u201D]/g, '"');
 
+const CJK_CHAR = /[\uAC00-\uD7AF\u3040-\u30FF\u4E00-\u9FFF]/;
+
 export const isHallucination = (text) => {
-  if (!text || text.length < 2) return true;
+  if (!text) return true;
+  // A lone Latin character is noise, but a single CJK syllable ("네") is a real reply
+  if (text.length < 2 && !CJK_CHAR.test(text)) return true;
   if (text.startsWith('♪') || text.startsWith('[') || text.startsWith('(')) return true;
   // Whisper internal token leakage (e.g. <|aesthetics_5|>, <|is_landscape_image|>)
   if (/\<\|[a-z_0-9]+\|\>/.test(text)) return true;
@@ -122,6 +126,23 @@ export const isRepeatedTranscription = (text) => {
 
 export const clearRecentTranscriptions = () => {
   recentTranscriptions.length = 0;
+};
+
+// Detect the microphone picking up our own TTS output: the transcript matches
+// (or is a long fragment of) a translation we recently spoke aloud.
+const ECHO_MIN_FRAGMENT_CHARS = 10;
+const normalizeForEcho = (s) => s.toLowerCase().replace(/[\s\p{P}]/gu, '');
+
+export const isTranslationEcho = (transcript, recentTranslations) => {
+  if (!transcript || !recentTranslations?.length) return false;
+  const needle = normalizeForEcho(transcript);
+  if (!needle) return false;
+  return recentTranslations.some((t) => {
+    const hay = normalizeForEcho(t);
+    if (!hay) return false;
+    if (hay === needle) return true;
+    return needle.length >= ECHO_MIN_FRAGMENT_CHARS && hay.includes(needle);
+  });
 };
 
 // Patterns that indicate the model is responding as an assistant instead of translating

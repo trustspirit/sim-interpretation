@@ -20,6 +20,10 @@ const pcm16ToFloat32 = (pcm16Buffer) => {
   return float32Array;
 };
 
+/**
+ * Playback graph for translated speech. Lives in its own AudioContext so it
+ * never shares a thread of control with microphone capture.
+ */
 export default function useRealtimeAudio() {
   const outputAudioContextRef = useRef(null);
   const mediaStreamDestRef = useRef(null);
@@ -30,6 +34,7 @@ export default function useRealtimeAudio() {
   const currentAudioDurationRef = useRef(0);
   const pendingAudioDurationRef = useRef(0);
   const selectedOutputRef = useRef('');
+  const activeSourcesRef = useRef(new Set());
 
   // Initialize audio context and routing
   const initAudioContext = useCallback(async () => {
@@ -67,12 +72,14 @@ export default function useRealtimeAudio() {
     }
 
     const ctx = outputAudioContextRef.current;
+    if (!ctx) return;
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
 
     const pcmBuffer = base64ToArrayBuffer(base64Audio);
     const float32Data = pcm16ToFloat32(pcmBuffer);
+    if (float32Data.length === 0) return;
 
     // Create audio buffer
     const audioBuffer = ctx.createBuffer(1, float32Data.length, 24000);
@@ -90,12 +97,11 @@ export default function useRealtimeAudio() {
     const startTime = Math.max(currentTime, nextPlayTimeRef.current);
     source.start(startTime);
     nextPlayTimeRef.current = startTime + audioBuffer.duration;
-
-    if (!isPlayingRef.current) {
-      isPlayingRef.current = true;
-    }
+    activeSourcesRef.current.add(source);
+    isPlayingRef.current = true;
 
     source.onended = () => {
+      activeSourcesRef.current.delete(source);
       source.disconnect();
       source.buffer = null;
       if (ctx.currentTime >= nextPlayTimeRef.current) {
@@ -106,7 +112,20 @@ export default function useRealtimeAudio() {
     return true;
   }, [initAudioContext]);
 
+  // Cut off everything that is scheduled; used on Stop so speech doesn't trail on
+  const stopPlayback = useCallback(() => {
+    for (const source of activeSourcesRef.current) {
+      try { source.stop(); } catch { /* already ended */ }
+      try { source.disconnect(); } catch { /* ignore */ }
+    }
+    activeSourcesRef.current.clear();
+    isPlayingRef.current = false;
+    nextPlayTimeRef.current = 0;
+    pendingAudioDurationRef.current = 0;
+  }, []);
+
   const stopAudio = useCallback(() => {
+    stopPlayback();
     if (audioElementRef.current) {
       audioElementRef.current.pause();
       audioElementRef.current.srcObject = null;
@@ -117,17 +136,11 @@ export default function useRealtimeAudio() {
       outputAudioContextRef.current = null;
     }
     mediaStreamDestRef.current = null;
-    isPlayingRef.current = false;
-    nextPlayTimeRef.current = 0;
-  }, []);
+  }, [stopPlayback]);
 
   const onAudioDone = useCallback(() => {
     currentAudioDurationRef.current = pendingAudioDurationRef.current;
     pendingAudioDurationRef.current = 0;
-  }, []);
-
-  const resetTiming = useCallback(() => {
-    nextPlayTimeRef.current = 0;
   }, []);
 
   const setEnabled = useCallback((enabled) => {
@@ -160,12 +173,11 @@ export default function useRealtimeAudio() {
   return useMemo(() => ({
     playAudioChunk,
     stopAudio,
+    stopPlayback,
     onAudioDone,
-    resetTiming,
     setEnabled,
     setOutputDevice,
     isPlaying: () => isPlayingRef.current,
     isEnabled: () => isEnabledRef.current,
-    getCurrentDuration: () => currentAudioDurationRef.current,
-  }), [playAudioChunk, stopAudio, onAudioDone, resetTiming, setEnabled, setOutputDevice]);
+  }), [playAudioChunk, stopAudio, stopPlayback, onAudioDone, setEnabled, setOutputDevice]);
 }

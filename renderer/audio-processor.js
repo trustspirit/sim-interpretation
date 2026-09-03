@@ -4,6 +4,7 @@ class AudioProcessor extends AudioWorkletProcessor {
     this.bufferSize = 2400; // 100ms at 24kHz
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
+    this.peak = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -18,15 +19,20 @@ class AudioProcessor extends AudioWorkletProcessor {
       }
 
       for (let i = 0; i < inputChannel.length; i++) {
-        this.buffer[this.bufferIndex++] = inputChannel[i];
+        const sample = inputChannel[i];
+        this.buffer[this.bufferIndex++] = sample;
+        const magnitude = sample < 0 ? -sample : sample;
+        if (magnitude > this.peak) this.peak = magnitude;
 
         if (this.bufferIndex >= this.bufferSize) {
           // Convert Float32 to PCM16
           const pcm16 = this.float32ToPcm16(this.buffer);
-          this.port.postMessage({ type: 'audio', buffer: pcm16.buffer }, [pcm16.buffer]);
+          // peak (0..1) lets the main thread track speech activity without relying on rAF
+          this.port.postMessage({ type: 'audio', buffer: pcm16.buffer, peak: this.peak }, [pcm16.buffer]);
 
           // Reset buffer index (reuse existing buffer to avoid GC pressure)
           this.bufferIndex = 0;
+          this.peak = 0;
         }
       }
     }

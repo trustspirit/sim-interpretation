@@ -79,11 +79,7 @@ async function createWindow() {
   // Handle permission requests from renderer
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     console.log('Permission requested:', permission);
-    if (permission === 'media') {
-      callback(true);
-    } else {
-      callback(true);
-    }
+    callback(permission === 'media');
   });
 
   mainWindow.loadFile('dist/index.html');

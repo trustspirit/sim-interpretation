@@ -1,7 +1,5 @@
 import { useRef, useCallback } from 'react';
 
-const SPEECH_THRESHOLD = 0.06;
-
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
   const bytes = new Uint8Array(buffer);
@@ -12,8 +10,15 @@ const arrayBufferToBase64 = (buffer) => {
   return btoa(binary);
 };
 
+/**
+ * Microphone capture → 24kHz PCM16 chunks.
+ * The capture graph is independent from the playback graph in useRealtimeAudio,
+ * so TTS output never blocks or gates the input. Echo cancellation keeps the
+ * speaker output from re-entering the mic on the default device.
+ */
 export default function useAudioCapture({
   selectedMic,
+  speechActivity,
   onAudioData,
   onError
 }) {
@@ -24,12 +29,7 @@ export default function useAudioCapture({
   const animationIdRef = useRef(null);
 
   const isActiveRef = useRef(false);
-  const audioLevelRef = useRef(0);
   const captureIdRef = useRef(0);
-
-  // Speech tracking for hallucination detection
-  const isSpeakingRef = useRef(false);
-  const lastSpeechEndRef = useRef(0);
 
   const startCapture = useCallback(async () => {
     try {
@@ -74,13 +74,13 @@ export default function useAudioCapture({
       analyserRef.current.fftSize = 256;
       source.connect(analyserRef.current);
 
-      // Send ALL audio to server — no gating
+      // Send ALL audio to server — no gating. Speech activity is tracked per chunk
+      // from the worklet thread, so it stays accurate even when the window is hidden.
       const worklet = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       worklet.port.onmessage = (event) => {
-        if (event.data.type === 'audio' && isActiveRef.current && currentCaptureId === captureIdRef.current) {
-          const base64Audio = arrayBufferToBase64(event.data.buffer);
-          onAudioData?.(base64Audio);
-        }
+        if (event.data.type !== 'audio' || !isActiveRef.current || currentCaptureId !== captureIdRef.current) return;
+        speechActivity?.onLevel(event.data.peak ?? 0);
+        onAudioData?.(arrayBufferToBase64(event.data.buffer));
       };
       source.connect(worklet);
       audioWorkletNodeRef.current = worklet;
@@ -90,12 +90,10 @@ export default function useAudioCapture({
       onError?.('Mic access denied');
       return false;
     }
-  }, [selectedMic, onAudioData, onError]);
+  }, [selectedMic, speechActivity, onAudioData, onError]);
 
   const stopCapture = useCallback(() => {
     isActiveRef.current = false;
-    audioLevelRef.current = 0;
-    isSpeakingRef.current = false;
 
     if (animationIdRef.current) {
       cancelAnimationFrame(animationIdRef.current);
@@ -117,9 +115,9 @@ export default function useAudioCapture({
     mediaStreamRef.current = null;
   }, []);
 
-  // Visualization + speech tracking (commit is handled by server semantic_vad)
+  // Level meter for the UI only
   const visualize = useCallback((onLevelChange) => {
-    if (!analyserRef.current || !isActiveRef.current) return 0;
+    if (!analyserRef.current || !isActiveRef.current) return;
 
     const bufferLength = analyserRef.current.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
@@ -130,19 +128,9 @@ export default function useAudioCapture({
       const amplitude = Math.abs(dataArray[i] - 128);
       if (amplitude > max) max = amplitude;
     }
-    const level = max / 128;
-    audioLevelRef.current = level;
-    onLevelChange?.(level);
-
-    if (level > SPEECH_THRESHOLD) {
-      isSpeakingRef.current = true;
-    } else if (isSpeakingRef.current) {
-      isSpeakingRef.current = false;
-      lastSpeechEndRef.current = Date.now();
-    }
+    onLevelChange?.(max / 128);
 
     animationIdRef.current = requestAnimationFrame(() => visualize(onLevelChange));
-    return level;
   }, []);
 
   const startVisualization = useCallback((onLevelChange) => {
@@ -155,13 +143,5 @@ export default function useAudioCapture({
     startCapture,
     stopCapture,
     startVisualization,
-    isActive: () => isActiveRef.current,
-    getAudioLevel: () => audioLevelRef.current,
-    isSpeaking: () => isSpeakingRef.current,
-    hadRecentSpeech: (thresholdMs = 2000) => {
-      if (isSpeakingRef.current) return true;
-      if (lastSpeechEndRef.current === 0) return false;
-      return (Date.now() - lastSpeechEndRef.current) < thresholdMs;
-    },
   };
 }

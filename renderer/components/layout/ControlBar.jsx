@@ -19,6 +19,7 @@ import { VoiceSelector } from '../selectors';
 
 export default function ControlBar({
   isListening,
+  isConnecting = false,
   onStart,
   onStop,
   fontSize,
@@ -39,11 +40,17 @@ export default function ControlBar({
   onClear,
   translationMode,
   onTranslationModeChange,
+  capabilities = { autoDirection: true, customInstruction: true, voiceSelection: true },
 }) {
+  const isRealtime = translationMode === 'realtime-translate';
+  const modeTitle = isRealtime
+    ? 'Realtime Translate: single connection, fixed direction (A → B or B → A), no custom instructions or voice choice. Click to switch to Standard.'
+    : 'Standard: STT + Chat Completions, supports Auto direction, instructions and voice choice. Click to switch to Realtime Translate.';
+
   return (
     <div className="flex items-center gap-2">
       {/* Start/Stop Button */}
-      {!isListening ? (
+      {!isListening && !isConnecting ? (
         <button
           onClick={onStart}
           className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-white text-black font-medium rounded-lg transition-all hover:bg-white/90 active:scale-[0.98]"
@@ -57,7 +64,7 @@ export default function ControlBar({
           className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-codex-error/90 text-white font-medium rounded-lg transition-all hover:bg-codex-error active:scale-[0.98]"
         >
           <Square size={14} fill="currentColor" />
-          <span>Stop</span>
+          <span>{isConnecting ? 'Cancel' : 'Stop'}</span>
         </button>
       )}
 
@@ -70,7 +77,7 @@ export default function ControlBar({
             ? 'bg-codex-live/20 border-codex-live text-codex-live'
             : 'bg-codex-surface border-codex-border text-codex-muted hover:text-codex-text hover:bg-codex-elevated'
         }`}
-        title={translationMode === 'whisper' ? 'Standard mode: STT + Chat Completions (click to switch to Realtime Translate)' : 'Realtime Translate mode: single connection (click to switch to Standard)'}
+        title={modeTitle}
       >
         <Zap size={13} />
         <span>{translationMode === 'whisper' ? 'Standard' : 'Realtime'}</span>
@@ -148,11 +155,13 @@ export default function ControlBar({
         
         {isVoiceMode && (
           <>
-            <VoiceSelector 
-              value={voiceType} 
-              onChange={onVoiceTypeChange} 
-              disabled={isSpeakingTTS} 
-            />
+            <span title={capabilities.voiceSelection ? undefined : 'Voice choice is not available in Realtime mode'}>
+              <VoiceSelector
+                value={voiceType}
+                onChange={onVoiceTypeChange}
+                disabled={isSpeakingTTS || !capabilities.voiceSelection}
+              />
+            </span>
             <button
               onClick={onToggleVoiceOnlyMode}
               className={`p-2 border rounded-lg transition-colors ${

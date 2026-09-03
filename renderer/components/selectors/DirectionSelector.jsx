@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
 import { getLanguageName } from '../../constants';
 
-export default function DirectionSelector({ value, onChange, disabled, langA, langB }) {
+export default function DirectionSelector({ value, onChange, disabled, autoDisabled = false, langA, langB }) {
   const [isOpen, setIsOpen] = useState(false);
 
   const options = [
-    { code: 'auto', label: 'Auto', icon: '↔', desc: 'Auto-detect language' },
+    {
+      code: 'auto', label: 'Auto', icon: '↔',
+      desc: autoDisabled ? 'Not available in Realtime mode' : 'Auto-detect language',
+      unavailable: autoDisabled,
+    },
     { code: 'a-to-b', label: `${getLanguageName(langA)} → ${getLanguageName(langB)}`, icon: '→', desc: `Speak ${getLanguageName(langA)}` },
     { code: 'b-to-a', label: `${getLanguageName(langB)} → ${getLanguageName(langA)}`, icon: '←', desc: `Speak ${getLanguageName(langB)}` },
   ];
@@ -40,13 +44,15 @@ export default function DirectionSelector({ value, onChange, disabled, langA, la
               {options.map((opt) => (
                 <button
                   key={opt.code}
+                  disabled={opt.unavailable}
                   onClick={() => {
+                    if (opt.unavailable) return;
                     onChange(opt.code);
                     localStorage.setItem('translatorDirection', opt.code);
                     setIsOpen(false);
                   }}
                   className={`w-full text-left px-3 py-2.5 transition-colors ${
-                    value === opt.code ? 'bg-white/10' : 'hover:bg-white/5'
+                    opt.unavailable ? 'opacity-40 cursor-not-allowed' : value === opt.code ? 'bg-white/10' : 'hover:bg-white/5'
                   }`}
                 >
                   <div className="flex items-center gap-2">

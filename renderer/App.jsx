@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 
 // Components
 import { Header, LanguageBar, ControlBar } from './components/layout';
@@ -15,9 +15,10 @@ import {
   useUISettings,
 } from './hooks';
 import useTranslationEngine from './hooks/useTranslationEngine';
+import { createSpeechActivityTracker } from './utils/speechActivity';
 
-// Constants
-import { getRealtimeVoice } from './constants';
+// Mic peak level (0..1) above which a chunk counts as speech
+const SPEECH_THRESHOLD = 0.06;
 
 export default function App() {
   // Language settings
@@ -53,6 +54,9 @@ export default function App() {
   const { selectedMic, selectMic } = useMicrophones();
   const realtimeAudio = useRealtimeAudio();
 
+  // Shared between capture (writes) and engines (reads) to reject silence hallucinations
+  const speechActivity = useMemo(() => createSpeechActivityTracker({ threshold: SPEECH_THRESHOLD }), []);
+
   const subtitle = useSubtitle({
     isEnabled: ui.isSubtitleMode,
     maxCharsPerLine: ui.maxCharsPerLine,
@@ -76,6 +80,7 @@ export default function App() {
     voiceType: voice.voiceType,
     customInstruction,
     isVoiceMode: voice.isVoiceMode,
+    speechActivity,
     onTranscript: translationSession.handleTranscript,
     onTranslation: translationSession.handleTranslation,
     onAudioChunk: translationSession.handleAudioChunk,
@@ -85,15 +90,15 @@ export default function App() {
   });
 
   const handleStop = useCallback(() => {
-    translationSession.resetSession();
     voice.cleanupTTS();
-    realtimeAudio.resetTiming();
-  }, [translationSession.resetSession, voice.cleanupTTS, realtimeAudio.resetTiming]);
+    realtimeAudio.stopPlayback();
+  }, [voice.cleanupTTS, realtimeAudio.stopPlayback]);
 
   // Connection manager — orchestrates engine + audio capture
   const connection = useConnectionManager({
     engine,
     selectedMic,
+    speechActivity,
     apiKey, envApiKey,
     updateStatus,
     onStop: handleStop,
@@ -103,6 +108,9 @@ export default function App() {
     setTranslationMode(newMode);
     localStorage.setItem('translatorMode', newMode);
   }, []);
+
+  // Realtime Translate has no bidirectional auto mode; show what will actually happen
+  const effectiveDirection = !engine.capabilities.autoDirection && direction === 'auto' ? 'a-to-b' : direction;
 
   // Effects
   useEffect(() => {
@@ -118,16 +126,11 @@ export default function App() {
     window.electronAPI?.getSubtitleMode?.().then(mode => ui.setIsSubtitleMode(mode || false));
   }, [selectMic]);
 
+  // Voice mode only toggles local playback; engines read isVoiceMode through refs
   useEffect(() => {
     voice.isVoiceModeRef.current = voice.isVoiceMode;
     realtimeAudio.setEnabled(voice.isVoiceMode);
-
-    if (!connection.isListeningRef.current) return;
-    const sessionUpdate = voice.isVoiceMode
-      ? { modalities: ['text', 'audio'], voice: getRealtimeVoice(voice.voiceType), output_audio_format: 'pcm16' }
-      : { modalities: ['text'] };
-    engine.send({ type: 'session.update', session: sessionUpdate });
-  }, [voice.isVoiceMode, voice.voiceType, realtimeAudio]);
+  }, [voice.isVoiceMode, realtimeAudio]);
 
   useEffect(() => {
     if (voice.audioOutput) realtimeAudio.setOutputDevice(voice.audioOutput);
@@ -143,7 +146,6 @@ export default function App() {
   // Process translations into subtitle queue
   useEffect(() => {
     if (!ui.isSubtitleMode) return;
-    if (translationSession.currentTranslation) return;
 
     const latestIndex = translationSession.translatedText.length - 1;
     if (latestIndex < 0 || latestIndex <= subtitle.getLastProcessedIndex()) return;
@@ -163,19 +165,20 @@ export default function App() {
         subtitle.startProcessing();
       }
     }
-  }, [ui.isSubtitleMode, translationSession.translatedText, translationSession.currentTranslation, subtitle, realtimeAudio]);
+  }, [ui.isSubtitleMode, translationSession.translatedText, subtitle, realtimeAudio]);
 
   // Subtitle Mode
   if (ui.isSubtitleMode) {
     return (
       <SubtitleMode
         currentSubtitle={subtitle.currentSubtitle}
-        currentTranslation={translationSession.currentTranslation}
         hasQueue={subtitle.hasQueue()}
         queueLength={subtitle.queue.length}
         isListening={connection.isListening}
+        isConnecting={connection.isConnecting}
         audioLevel={connection.audioLevel}
         status={status}
+        langA={langA}
         langB={langB}
         subtitlePosition={ui.subtitlePosition}
         onToggleSubtitleMode={ui.toggleSubtitleMode}
@@ -201,17 +204,17 @@ export default function App() {
       <LanguageBar
         langA={langA}
         langB={langB}
-        direction={direction}
+        direction={effectiveDirection}
+        autoDisabled={!engine.capabilities.autoDirection}
         onLangAChange={setLangA}
         onLangBChange={setLangB}
         onDirectionChange={setDirection}
-        disabled={connection.isListening}
+        disabled={connection.isListening || connection.isConnecting}
       />
 
       <main className="flex-1 flex flex-col min-h-0 p-4">
         <TranslationDisplay
           translatedText={translationSession.translatedText}
-          currentTranslation={translationSession.currentTranslation}
           originalText={translationSession.originalText}
           fontSize={ui.fontSize}
           textDirection={ui.textDirection}
@@ -224,6 +227,7 @@ export default function App() {
 
         <ControlBar
           isListening={connection.isListening}
+          isConnecting={connection.isConnecting}
           onStart={connection.startListening}
           onStop={connection.stopListening}
           fontSize={ui.fontSize}
@@ -244,6 +248,7 @@ export default function App() {
           onClear={translationSession.clearTranscripts}
           translationMode={translationMode}
           onTranslationModeChange={handleTranslationModeChange}
+          capabilities={engine.capabilities}
         />
       </main>
     </div>

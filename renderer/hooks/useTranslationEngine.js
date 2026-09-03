@@ -10,11 +10,11 @@ import useRealtimeTranslateEngine from './engines/useRealtimeTranslateEngine';
  */
 export default function useTranslationEngine({
   mode,
-  langA, langB, direction, voiceType, customInstruction, isVoiceMode,
+  langA, langB, direction, voiceType, customInstruction, isVoiceMode, speechActivity,
   onTranscript, onTranslation, onAudioChunk, onAudioDone, onStatusChange, onDisconnect,
 }) {
   const sharedParams = {
-    langA, langB, direction, voiceType, customInstruction, isVoiceMode,
+    langA, langB, direction, voiceType, customInstruction, isVoiceMode, speechActivity,
     onTranscript, onTranslation, onAudioChunk, onAudioDone, onStatusChange, onDisconnect,
   };
 
@@ -41,10 +41,16 @@ export default function useTranslationEngine({
 
     console.log(`[TranslationEngine] Switching mode: ${prevMode} → ${mode}`);
     onStatusChangeRef.current?.('connecting', 'Switching mode...');
+    oldEngine.stopForceCommitTimer();
     oldEngine.disconnect();
-    newEngine.connect(apiKeyRef.current).catch(() => {
-      onStatusChangeRef.current?.('error', 'Mode switch failed');
-    });
+    newEngine.connect(apiKeyRef.current)
+      .then(() => {
+        newEngine.startForceCommitTimer();
+        onStatusChangeRef.current?.('connected', 'Speak now');
+      })
+      .catch(() => {
+        onStatusChangeRef.current?.('error', 'Mode switch failed');
+      });
   }, [mode, whisper, realtimeTranslate]);
 
   const activeEngine = mode === 'whisper' ? whisper : realtimeTranslate;
@@ -66,6 +72,7 @@ export default function useTranslationEngine({
   }, [whisper, realtimeTranslate]);
 
   return {
+    capabilities: activeEngine.capabilities,
     connect,
     disconnect,
     sendAudio: activeEngine.sendAudio,

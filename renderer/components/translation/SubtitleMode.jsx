@@ -13,10 +13,10 @@ import { getLanguageName } from '../../constants';
 
 export default function SubtitleMode({
   currentSubtitle,
-  currentTranslation,
   hasQueue,
   queueLength,
   isListening,
+  isConnecting = false,
   audioLevel,
   status,
   langA,
@@ -32,8 +32,7 @@ export default function SubtitleMode({
   const [isHovered, setIsHovered] = useState(false);
   const hoverTimeoutRef = useRef(null);
 
-  const displayText = currentSubtitle || (isListening ? 'Listening...' : 'Ready');
-  const isStreaming = !!currentTranslation;
+  const displayText = currentSubtitle || (isListening ? 'Listening...' : isConnecting ? 'Connecting...' : 'Ready');
 
   // Calculate max characters per line based on container size
   useEffect(() => {
@@ -100,17 +99,11 @@ export default function SubtitleMode({
           }}
         >
           {displayText}
-          {isStreaming && (
-            <span
-              className="inline-block w-[3px] bg-codex-live ml-1 animate-blink"
-              style={{ height: '0.8em' }}
-            />
-          )}
         </p>
       </div>
 
       {/* Queue indicator */}
-      {hasQueue && !isStreaming && (
+      {hasQueue && (
         <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1">
           {Array(Math.min(5, queueLength)).fill(0).map((_, i) => (
             <div key={i} className="w-1.5 h-1.5 rounded-full bg-white/40" />
@@ -153,7 +146,7 @@ export default function SubtitleMode({
           
           <div className="w-px h-6 bg-white/30" />
           
-          {!isListening ? (
+          {!isListening && !isConnecting ? (
             <button
               onClick={onStart}
               className="p-2 hover:bg-white/20 rounded-full transition-colors"
