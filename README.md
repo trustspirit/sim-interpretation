@@ -11,7 +11,7 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 ### Real-time Voice Translation
 - Real-time microphone input recognition
 - Two selectable engines (toggle in the control bar):
-  - **Standard**: Realtime API transcription (`gpt-4o-transcribe`) + Chat Completions translation. Supports Auto direction, custom instructions and voice choice.
+  - **Standard**: Realtime API transcription (`gpt-transcribe`) + Chat Completions translation (`gpt-6-luna`, falling back automatically to `gpt-5.4-mini` / `gpt-4.1-mini` if unavailable). Supports Auto direction, custom instructions and voice choice.
   - **Realtime**: single `gpt-realtime-translate` connection for transcription, translation and speech. Fixed direction only (A → B or B → A); instructions and voice choice do not apply.
 - Translations are always shown in the order the sentences were spoken
 - Continuous speech without pauses is still translated every few seconds (committed at the next short gap, or after 8s at most)
@@ -34,9 +34,9 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 - German
 
 ### Voice Mode (Text-to-Speech)
-Listen to translations spoken aloud. Standard mode streams `gpt-4o-mini-tts` audio over a separate HTTP request, so microphone capture and playback run in parallel without blocking each other.
+Listen to translations spoken aloud. Standard mode streams `gpt-4o-mini-tts` (2025-12-15) audio over a separate HTTP request, so microphone capture and playback run in parallel without blocking each other.
 
-- **Multiple voices**: Alloy, Echo, Fable, Onyx, Nova, Shimmer (Standard mode)
+- **Multiple voices**: Marin, Cedar, Alloy, Echo, Fable, Onyx, Nova, Shimmer (Standard mode)
 - **Voice-only mode**: Hide text and only hear audio output
 - Queued playback keeps sentences in order; Stop cuts playback immediately
 

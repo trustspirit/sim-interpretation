@@ -1,5 +1,7 @@
 // Voice options for TTS (names match the OpenAI Speech API voices)
 export const voiceOptions = [
+  { code: 'marin', name: 'Marin', desc: 'Natural female' },
+  { code: 'cedar', name: 'Cedar', desc: 'Natural male' },
   { code: 'alloy', name: 'Alloy', desc: 'Neutral' },
   { code: 'echo', name: 'Echo', desc: 'Male' },
   { code: 'fable', name: 'Fable', desc: 'British' },
@@ -9,4 +11,4 @@ export const voiceOptions = [
 ];
 
 // Get voice by code
-export const getVoice = (code) => voiceOptions.find(v => v.code === code) || voiceOptions[4];
+export const getVoice = (code) => voiceOptions.find(v => v.code === code) || voiceOptions.find(v => v.code === 'nova');

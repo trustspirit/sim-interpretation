@@ -19,6 +19,7 @@ import { extractCompleteSentences } from '../../utils/sentences';
 import { createOrderedEmitter } from '../../utils/orderedEmitter';
 import { createPcmChunker } from '../../utils/pcmChunker';
 import { createRealtimeSocket } from '../../utils/realtimeSocket';
+import { createModelSelector, isModelRejection } from '../../utils/translationModels';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
 // Refresh the session before the server's age limit, preferably during a pause
@@ -38,8 +39,7 @@ const TRANSCRIPT_SPEECH_WINDOW_MS = 8000;
 // keep each attempt short and retry once instead of waiting a long time.
 const TRANSLATION_ATTEMPT_TIMEOUT_MS = 6000;
 const TRANSLATION_MAX_ATTEMPTS = 2;
-const TRANSLATION_MODEL = 'gpt-4o-mini';
-const TTS_MODEL = 'gpt-4o-mini-tts';
+const TTS_MODEL = 'gpt-4o-mini-tts-2025-12-15';
 
 // Server errors that don't affect the session
 const IGNORED_ERROR_FRAGMENTS = ['no active response', 'buffer too small', 'not found'];
@@ -242,29 +242,42 @@ export default function useWhisperEngine({
     orderRef.current = createOrderedEmitter((text) => emitTranslationRef.current(text));
   }
 
+  // Shared across requests: once a model is rejected, later requests skip it
+  const modelSelectorRef = useRef(null);
+  if (!modelSelectorRef.current) modelSelectorRef.current = createModelSelector();
+
   const requestTranslation = useCallback(async (messages, signal) => {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKeyRef.current}`,
-      },
-      signal,
-      body: JSON.stringify({
-        model: TRANSLATION_MODEL,
-        messages,
-        temperature: 0.2,
-        max_tokens: 600,
-        response_format: TRANSLATION_RESPONSE_FORMAT,
-      }),
-    });
-    if (!response.ok) {
-      const err = new Error(`Translation HTTP ${response.status}`);
-      err.status = response.status;
-      throw err;
+    const selector = modelSelectorRef.current;
+    for (;;) {
+      const entry = selector.current();
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKeyRef.current}`,
+        },
+        signal,
+        body: JSON.stringify({
+          model: entry.model,
+          messages,
+          ...entry.params,
+          response_format: TRANSLATION_RESPONSE_FORMAT,
+        }),
+      });
+      if (!response.ok) {
+        let apiError = null;
+        try { apiError = (await response.json())?.error ?? null; } catch { /* non-JSON body */ }
+        if (isModelRejection(response.status, apiError) && selector.reject(entry)) {
+          console.warn(`[Whisper] ${entry.model} unavailable (${apiError?.message || response.status}), using ${selector.current().model}`);
+          continue;
+        }
+        const err = new Error(`Translation HTTP ${response.status}${apiError?.message ? `: ${apiError.message}` : ''}`);
+        err.status = response.status;
+        throw err;
+      }
+      const data = await response.json();
+      return parseTranslationContent(data.choices?.[0]?.message?.content);
     }
-    const data = await response.json();
-    return parseTranslationContent(data.choices?.[0]?.message?.content);
   }, []);
 
   const sendForTranslation = useCallback(async (text) => {

@@ -7,12 +7,12 @@ const base = { langA: 'en', langB: 'ko', customInstruction: '', recentTranscript
 
 describe('buildTranscriptionConfig', () => {
   it('pins the source language for fixed directions', () => {
-    expect(buildTranscriptionConfig({ ...base, direction: 'a-to-b' }).language).toBe('en');
-    expect(buildTranscriptionConfig({ ...base, direction: 'b-to-a' }).language).toBe('ko');
+    expect(buildTranscriptionConfig({ ...base, direction: 'a-to-b' }).languages).toEqual(['en']);
+    expect(buildTranscriptionConfig({ ...base, direction: 'b-to-a' }).languages).toEqual(['ko']);
   });
 
-  it('omits language in auto mode', () => {
-    expect(buildTranscriptionConfig({ ...base, direction: 'auto' })).not.toHaveProperty('language');
+  it('limits auto mode to the language pair', () => {
+    expect(buildTranscriptionConfig({ ...base, direction: 'auto' }).languages).toEqual(['en', 'ko']);
   });
 
   it('keeps the custom instruction in the prompt when recent context is added', () => {
@@ -21,7 +21,7 @@ describe('buildTranscriptionConfig', () => {
       customInstruction: 'Terms: Kubernetes, Overdare',
       recentTranscripts: ['We deploy on Kubernetes.', 'Then we scale.'],
     });
-    expect(cfg.language).toBe('en');
+    expect(cfg.languages).toEqual(['en']);
     expect(cfg.prompt).toBe('Terms: Kubernetes, Overdare\nWe deploy on Kubernetes. Then we scale.');
   });
 
@@ -30,13 +30,13 @@ describe('buildTranscriptionConfig', () => {
   });
 
   it('always names the transcription model', () => {
-    expect(buildTranscriptionConfig({ ...base, direction: 'auto' }).model).toBe('gpt-4o-transcribe');
+    expect(buildTranscriptionConfig({ ...base, direction: 'auto' }).model).toBe('gpt-transcribe');
   });
 });
 
 describe('buildSessionConfig', () => {
   it('wraps the transcription config in a GA transcription session with VAD and noise reduction', () => {
-    const transcription = { model: 'gpt-4o-transcribe', language: 'ko' };
+    const transcription = { model: 'gpt-transcribe', languages: ['ko'] };
     expect(buildSessionConfig(transcription)).toEqual({
       type: 'transcription',
       audio: {

@@ -1,4 +1,6 @@
-export const TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+// gpt-transcribe transcribes committed turns (VAD or manual commit) and takes
+// language hints; gpt-4o-transcribe is scheduled for shutdown in February 2027.
+export const TRANSCRIPTION_MODEL = 'gpt-transcribe';
 
 // Long prompts are more likely to be read back as a transcript on silence
 const MAX_PROMPT_CONTEXT_CHARS = 240;
@@ -33,8 +35,11 @@ function tailContext(recentTranscripts) {
 export function buildTranscriptionConfig({ direction, langA, langB, customInstruction, recentTranscripts }) {
   const config = { model: TRANSCRIPTION_MODEL };
 
-  if (direction === 'a-to-b') config.language = langA;
-  else if (direction === 'b-to-a') config.language = langB;
+  // Fixed direction: the source language is known. Auto: restrict detection to
+  // the pair, so a short or accented utterance isn't transcribed as a third language.
+  if (direction === 'a-to-b') config.languages = [langA];
+  else if (direction === 'b-to-a') config.languages = [langB];
+  else if (langA && langB) config.languages = [langA, langB];
 
   const parts = [];
   if (customInstruction?.trim()) parts.push(customInstruction.trim().slice(0, MAX_PROMPT_INSTRUCTION_CHARS));
