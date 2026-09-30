@@ -45,4 +45,12 @@ describe('createSpeechActivityTracker', () => {
     t.onLevel(0.07, 200000);
     expect(t.hadSpeechSince(200000)).toBe(true);
   });
+
+  it('reports an energy dip between words, not in the middle of one', () => {
+    const t = createSpeechActivityTracker({ threshold: 0.06 });
+    [0.3, 0.35, 0.32].forEach((l, i) => t.onLevel(l, i * 100));
+    expect(t.energyDipped()).toBe(false);
+    t.onLevel(0.08, 400);
+    expect(t.energyDipped()).toBe(true);
+  });
 });

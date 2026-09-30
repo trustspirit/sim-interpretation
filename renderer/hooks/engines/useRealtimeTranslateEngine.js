@@ -7,9 +7,10 @@ import { createRealtimeSocket } from '../../utils/realtimeSocket';
 import { createStreamSegmenter } from '../../utils/sentences';
 
 const TRANSLATE_URL = 'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate';
-const SESSION_SOFT_MAX_AGE_MS = 25 * 60 * 1000;
-const SESSION_HARD_MAX_AGE_MS = 29 * 60 * 1000;
-const ROTATE_QUIET_MS = 3000;
+// Refresh before the server's 60-minute limit; the handoff has no audio gap
+const SESSION_SOFT_MAX_AGE_MS = 45 * 60 * 1000;
+const SESSION_HARD_MAX_AGE_MS = 55 * 60 * 1000;
+const ROTATE_QUIET_MS = 1500;
 const SESSION_CHECK_INTERVAL_MS = 5000;
 // Deltas are grouped into lines: complete sentences go out immediately, a
 // fragment after SEGMENT_IDLE_MS of silence, and run-on speech every SEGMENT_MAX_AGE_MS.
@@ -110,25 +111,38 @@ export default function useRealtimeTranslateEngine({
   emitInputSegmentRef.current = emitInputSegment;
   emitOutputSegmentRef.current = emitOutputSegment;
 
-  const segmentersRef = useRef(null);
-  if (!segmentersRef.current) {
+  // One pair of segmenters per live session, plus one for a session being
+  // retired during a refresh, so the two streams' deltas never interleave.
+  const createSegmenters = () => {
     const options = { idleMs: SEGMENT_IDLE_MS, maxAgeMs: SEGMENT_MAX_AGE_MS };
-    segmentersRef.current = {
+    return {
       input: createStreamSegmenter({ ...options, onSegment: (t) => emitInputSegmentRef.current(t) }),
       output: createStreamSegmenter({ ...options, onSegment: (t) => emitOutputSegmentRef.current(t) }),
     };
-  }
+  };
+  const segmentersRef = useRef(null);
+  const retiredSegmentersRef = useRef(null);
+  if (!segmentersRef.current) segmentersRef.current = createSegmenters();
 
   const flushSegments = useCallback(() => {
     segmentersRef.current.input.flush();
     segmentersRef.current.output.flush();
   }, []);
 
-  const handleServerEvent = useCallback((event) => {
+  const flushRetiredSegments = useCallback(() => {
+    const retired = retiredSegmentersRef.current;
+    retiredSegmentersRef.current = null;
+    retired?.input.flush();
+    retired?.output.flush();
+  }, []);
+
+  const handleServerEvent = useCallback((event, { retired = false } = {}) => {
     if (['error', 'session.updated', 'session.created'].includes(event.type)) {
       console.log('[RealtimeTranslate Event]', event.type, JSON.stringify(event).substring(0, 200));
     }
-    const { input, output } = segmentersRef.current;
+    const segmenters = retired ? retiredSegmentersRef.current : segmentersRef.current;
+    if (!segmenters) return;
+    const { input, output } = segmenters;
 
     switch (event.type) {
       case 'session.input_transcript.delta':
@@ -187,8 +201,10 @@ export default function useRealtimeTranslateEngine({
     socketRef.current = createRealtimeSocket({
       url: TRANSLATE_URL,
       onOpen: () => socketHandlersRef.current.onOpen?.(),
-      onEvent: (event) => socketHandlersRef.current.onEvent?.(event),
+      onEvent: (event, meta) => socketHandlersRef.current.onEvent?.(event, meta),
       onClose: (info) => socketHandlersRef.current.onClose?.(info),
+      onRetire: () => socketHandlersRef.current.onRetire?.(),
+      onRetireEnd: () => socketHandlersRef.current.onRetireEnd?.(),
       onStatus: (state, text) => onStatusChangeRef.current?.(state, text),
     });
   }
@@ -212,6 +228,13 @@ export default function useRealtimeTranslateEngine({
       hasOpenedRef.current = true;
     },
     onEvent: handleServerEvent,
+    // Session refresh: the old session's pending text keeps its own segmenters
+    onRetire: () => {
+      flushRetiredSegments();
+      retiredSegmentersRef.current = segmentersRef.current;
+      segmentersRef.current = createSegmenters();
+    },
+    onRetireEnd: flushRetiredSegments,
     onClose: () => {
       // Deltas from the closed session will never be completed; show what arrived
       flushSegments();
@@ -226,7 +249,7 @@ export default function useRealtimeTranslateEngine({
     const age = socket.sessionAgeMs();
     const tracker = speechActivityRef.current;
     const longQuiet = tracker ? !tracker.hadSpeechWithin(ROTATE_QUIET_MS) : true;
-    if ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS) {
+    if (!socket.isRotating() && ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS)) {
       console.log('[RealtimeTranslate] Refreshing session');
       socket.rotate();
     }
@@ -260,8 +283,9 @@ export default function useRealtimeTranslateEngine({
   const disconnect = useCallback(() => {
     stopSessionCheck();
     socketRef.current.disconnect();
+    flushRetiredSegments();
     flushSegments();
-  }, [stopSessionCheck, flushSegments]);
+  }, [stopSessionCheck, flushSegments, flushRetiredSegments]);
 
   // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
   useEffect(() => {

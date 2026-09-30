@@ -20,17 +20,21 @@ import { createOrderedEmitter } from '../../utils/orderedEmitter';
 import { createPcmChunker } from '../../utils/pcmChunker';
 import { createRealtimeSocket } from '../../utils/realtimeSocket';
 import { createModelSelector, isModelRejection } from '../../utils/translationModels';
+import { createAudioLedger } from '../../utils/audioLedger';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
-// Refresh the session before the server's age limit, preferably during a pause
-const SESSION_SOFT_MAX_AGE_MS = 25 * 60 * 1000;
-const SESSION_HARD_MAX_AGE_MS = 29 * 60 * 1000;
-const ROTATE_QUIET_MS = 3000;
+// Refresh the session before the server's 60-minute limit. The handoff has no
+// gap, but a pause is still the nicest moment for it.
+const SESSION_SOFT_MAX_AGE_MS = 45 * 60 * 1000;
+const SESSION_HARD_MAX_AGE_MS = 55 * 60 * 1000;
+const ROTATE_QUIET_MS = 1500;
 const COMMIT_CHECK_INTERVAL_MS = 250;
 const SENTENCE_FLUSH_TIMEOUT_MS = 1500;
 const MAX_WHISPER_CONTEXT = 3;
-// session.update resets are cheap but not free; don't send one per utterance
+// Rolling transcription context is updated at most this often, and only in a
+// pause, so the session is never reconfigured while someone is mid-sentence.
 const CONTEXT_UPDATE_MIN_INTERVAL_MS = 10 * 1000;
+const CONTEXT_UPDATE_QUIET_MS = 700;
 const MAX_RECENT_TRANSLATIONS = 5;
 const MAX_TRANSLATION_CONTEXT = 3;
 // A transcript arriving with no microphone energy in this window is a silence hallucination.
@@ -92,6 +96,7 @@ export default function useWhisperEngine({
   const recentTranscriptsRef = useRef([]);
   const translationHistoryRef = useRef([]);
   const lastContextUpdateAtRef = useRef(0);
+  const contextDirtyRef = useRef(false);
   const speakQueueRef = useRef(Promise.resolve());
 
   // Sentence buffering and commit scheduling
@@ -130,6 +135,12 @@ export default function useWhisperEngine({
   isVoiceModeRef.current = isVoiceMode;
   speechActivityRef.current = speechActivity;
 
+  // Audio is kept until its transcript arrives and replayed after a dropped
+  // connection, so nothing said during a network hiccup is lost
+  const ledgerRef = useRef(null);
+  if (!ledgerRef.current) ledgerRef.current = createAudioLedger();
+  const needsReplayRef = useRef(false);
+
   // Socket handlers are defined below; the socket reaches them through this ref
   const socketHandlersRef = useRef({});
   const socketRef = useRef(null);
@@ -137,8 +148,9 @@ export default function useWhisperEngine({
     socketRef.current = createRealtimeSocket({
       url: REALTIME_URL,
       onOpen: () => socketHandlersRef.current.onOpen?.(),
-      onEvent: (event) => socketHandlersRef.current.onEvent?.(event),
+      onEvent: (event, meta) => socketHandlersRef.current.onEvent?.(event, meta),
       onClose: (info) => socketHandlersRef.current.onClose?.(info),
+      onRetire: (sendToOld) => socketHandlersRef.current.onRetire?.(sendToOld),
       onStatus: (state, text) => onStatusChangeRef.current?.(state, text),
     });
   }
@@ -167,13 +179,18 @@ export default function useWhisperEngine({
     abortControllersRef.current.clear();
   }, []);
 
-  const getSessionConfig = useCallback(() => buildSessionConfig(buildTranscriptionConfig({
+  const getTranscriptionConfig = useCallback(() => buildTranscriptionConfig({
     direction: directionRef.current,
     langA: langARef.current,
     langB: langBRef.current,
     customInstruction: customInstructionRef.current,
     recentTranscripts: recentTranscriptsRef.current,
-  })), []);
+  }), []);
+
+  const getSessionConfig = useCallback(
+    () => buildSessionConfig(getTranscriptionConfig()),
+    [getTranscriptionConfig]
+  );
 
   // ---- Voice output: Speech API, streamed PCM16 @ 24kHz ----
   const synthesizeSpeech = useCallback(async (text, generation) => {
@@ -381,8 +398,9 @@ export default function useWhisperEngine({
     }
   }, [sendForTranslation]);
 
-  // Runs every COMMIT_CHECK_INTERVAL_MS while listening: commits run-on speech at
-  // a natural gap, and refreshes the session before the server's age limit.
+  // Runs every COMMIT_CHECK_INTERVAL_MS while listening: commits run-on speech
+  // between words, updates the transcription context during pauses, and
+  // refreshes the session before the server's age limit.
   const tick = useCallback(() => {
     const socket = socketRef.current;
     if (!socket.isOpen()) return;
@@ -391,17 +409,36 @@ export default function useWhisperEngine({
 
     const hadSpeech = tracker ? tracker.hadSpeechSince(lastCommitAtRef.current) : false;
     const isQuiet = tracker ? !tracker.hadSpeechWithin(COMMIT_GAP_MS, now) : true;
-    if (shouldForceCommit({ sinceCommitMs: now - lastCommitAtRef.current, hadSpeech, isQuiet })) {
+    if (shouldForceCommit({
+      sinceCommitMs: now - lastCommitAtRef.current,
+      hadSpeech,
+      isQuiet,
+      energyDipped: tracker?.energyDipped() ?? false,
+    })) {
       if (commitAudio()) console.log('[Whisper] Forced audio commit');
+    }
+
+    // Only the transcription field is sent: session.update changes just the
+    // fields present, so VAD and the audio buffer are left untouched.
+    const pause = tracker ? !tracker.hadSpeechWithin(CONTEXT_UPDATE_QUIET_MS, now) : true;
+    if (contextDirtyRef.current && pause && now - lastContextUpdateAtRef.current >= CONTEXT_UPDATE_MIN_INTERVAL_MS) {
+      const sent = send({
+        type: 'session.update',
+        session: { type: 'transcription', audio: { input: { transcription: getTranscriptionConfig() } } },
+      });
+      if (sent) {
+        contextDirtyRef.current = false;
+        lastContextUpdateAtRef.current = now;
+      }
     }
 
     const age = socket.sessionAgeMs();
     const longQuiet = tracker ? !tracker.hadSpeechWithin(ROTATE_QUIET_MS, now) : true;
-    if ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS) {
+    if (!socket.isRotating() && ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS)) {
       console.log('[Whisper] Refreshing session');
       socket.rotate();
     }
-  }, [commitAudio]);
+  }, [commitAudio, send, getTranscriptionConfig]);
 
   const startForceCommitTimer = useCallback(() => {
     lastCommitAtRef.current = Date.now();
@@ -448,22 +485,16 @@ export default function useWhisperEngine({
     if (recentTranscriptsRef.current.length > MAX_WHISPER_CONTEXT) {
       recentTranscriptsRef.current.shift();
     }
-    // Rolling context helps recognition of names and terms. Re-send the full
-    // input block so language and the custom prompt survive alongside it.
-    const now = Date.now();
-    if (now - lastContextUpdateAtRef.current >= CONTEXT_UPDATE_MIN_INTERVAL_MS) {
-      if (send({ type: 'session.update', session: getSessionConfig() })) {
-        lastContextUpdateAtRef.current = now;
-      }
-    }
+    // Rolling context helps recognition of names and terms; tick() sends it in a pause
+    contextDirtyRef.current = true;
 
     onTranscriptRef.current?.(transcript);
 
     sentenceBufferRef.current = (sentenceBufferRef.current + ' ' + transcript).trim();
     processSentenceBuffer(false);
-  }, [send, getSessionConfig, processSentenceBuffer]);
+  }, [processSentenceBuffer]);
 
-  const handleServerEvent = useCallback((event) => {
+  const handleServerEvent = useCallback((event, { retired = false } = {}) => {
     if (event.type === 'error' || event.type === 'session.updated') {
       console.log('[Whisper Event]', event.type, JSON.stringify(event).substring(0, 200));
     } else if ([
@@ -476,13 +507,18 @@ export default function useWhisperEngine({
 
     switch (event.type) {
       case 'input_audio_buffer.committed':
-        lastCommitAtRef.current = Date.now();
+        if (!retired) {
+          lastCommitAtRef.current = Date.now();
+          ledgerRef.current.committed(event.item_id);
+        }
         break;
 
       case 'conversation.item.input_audio_transcription.completed': {
         try {
+          if (!retired) ledgerRef.current.confirmed(event.item_id);
           const transcript = event.transcript?.trim();
-          if (event.item_id) send({ type: 'conversation.item.delete', item_id: event.item_id });
+          // Items of a retired socket belong to that session; nothing to clean up here
+          if (event.item_id && !retired) send({ type: 'conversation.item.delete', item_id: event.item_id });
           if (errorShownRef.current) {
             errorShownRef.current = false;
             onStatusChangeRef.current?.('connected', 'Speak now');
@@ -496,7 +532,8 @@ export default function useWhisperEngine({
 
       case 'conversation.item.input_audio_transcription.failed':
         console.error('[Whisper] Transcription failed:', event.error?.message);
-        if (event.item_id) send({ type: 'conversation.item.delete', item_id: event.item_id });
+        if (!retired) ledgerRef.current.confirmed(event.item_id);
+        if (event.item_id && !retired) send({ type: 'conversation.item.delete', item_id: event.item_id });
         break;
 
       case 'error': {
@@ -513,15 +550,39 @@ export default function useWhisperEngine({
   socketHandlersRef.current = {
     onOpen: () => {
       send({ type: 'session.update', session: getSessionConfig() });
+      if (needsReplayRef.current) {
+        // Resend what the dropped session never transcribed, in order
+        needsReplayRef.current = false;
+        let replayed = 0;
+        for (const { chunks, commit } of ledgerRef.current.takeForReplay()) {
+          for (const audio of chunks) send({ type: 'input_audio_buffer.append', audio });
+          if (commit) send({ type: 'input_audio_buffer.commit' });
+          replayed += chunks.length;
+        }
+        if (replayed) console.log(`[Whisper] Replayed ${replayed * 100}ms of untranscribed audio`);
+      }
       lastCommitAtRef.current = Date.now();
       lastContextUpdateAtRef.current = Date.now();
+      contextDirtyRef.current = false;
       errorShownRef.current = false;
       onStatusChangeRef.current?.('connected', hasOpenedRef.current ? 'Speak now' : 'Connected');
       hasOpenedRef.current = true;
     },
     onEvent: handleServerEvent,
+    // Session refresh: the old socket still holds the speech since the last
+    // commit. Commit it there so it is transcribed, while new audio already
+    // streams to the new session.
+    onRetire: (sendToOld) => {
+      const tracker = speechActivityRef.current;
+      if (!tracker || tracker.hadSpeechSince(lastCommitAtRef.current)) {
+        sendToOld({ type: 'input_audio_buffer.commit' });
+      }
+      // The old session finishes its own audio; track only the new one
+      ledgerRef.current.reset();
+    },
     onClose: ({ intentional }) => {
-      // Don't lose the trailing fragment across a session refresh or drop
+      if (!intentional) needsReplayRef.current = true;
+      // Don't lose the trailing fragment across a dropped connection
       if (!intentional && sentenceBufferRef.current) processSentenceBuffer(true);
       onDisconnectRef.current?.();
     },
@@ -541,6 +602,8 @@ export default function useWhisperEngine({
     }
     apiKeyRef.current = apiKey;
     hasOpenedRef.current = false;
+    needsReplayRef.current = false;
+    ledgerRef.current.reset();
     return socketRef.current.connect(apiKey).catch((err) => {
       onStatusChangeRef.current?.('error', err.message);
       throw err;
@@ -558,6 +621,8 @@ export default function useWhisperEngine({
     speakQueueRef.current = Promise.resolve();
     clearSessionState();
     socketRef.current.disconnect();
+    ledgerRef.current.reset();
+    needsReplayRef.current = false;
   }, [abortAllRequests, clearSessionState]);
 
   // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
@@ -572,10 +637,13 @@ export default function useWhisperEngine({
     };
   }, [abortAllRequests]);
 
-  // Audio is buffered while the socket reconnects, then flushed in order
-  const sendAudio = useCallback((base64Audio) => (
-    socketRef.current.sendBuffered({ type: 'input_audio_buffer.append', audio: base64Audio })
-  ), []);
+  // Every chunk goes into the ledger first; while disconnected it is only
+  // recorded there and replayed after the reconnect
+  const sendAudio = useCallback((base64Audio) => {
+    if (!socketRef.current.isActive()) return false;
+    ledgerRef.current.record(base64Audio);
+    return socketRef.current.send({ type: 'input_audio_buffer.append', audio: base64Audio });
+  }, []);
 
   return {
     capabilities,

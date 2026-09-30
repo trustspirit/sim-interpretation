@@ -16,7 +16,9 @@ A desktop application for real-time speech recognition and translation. Uses Ope
 - Translations are always shown in the order the sentences were spoken
 - Continuous speech without pauses is still translated every few seconds (committed at the next short gap, or after 8s at most)
 - Each line is translated with the previous lines as reference context, and the model is constrained to return only a translation (it never answers questions addressed to "you")
-- Dropped connections and session refreshes reconnect automatically with backoff; audio spoken meanwhile is buffered and sent after reconnecting
+- Listening never pauses while earlier speech is being translated: capture, transcription and translation run independently
+- Audio is kept until its transcript arrives; after a dropped connection anything not yet transcribed is replayed, so nothing said during a hiccup is lost
+- Session refreshes hand over to a new connection with no gap: the old one finishes transcribing what it already received
 
 ### Hallucination Guards
 - Silent audio is never force-committed, and transcripts that arrive without microphone activity are dropped

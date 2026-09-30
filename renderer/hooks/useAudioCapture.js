@@ -1,11 +1,14 @@
 import { useRef, useCallback } from 'react';
 
+const LEVEL_UPDATE_MS = 66;
+
 // Convert ArrayBuffer to Base64
 const arrayBufferToBase64 = (buffer) => {
   const bytes = new Uint8Array(buffer);
   let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const STEP = 0x8000;
+  for (let i = 0; i < bytes.length; i += STEP) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
   }
   return btoa(binary);
 };
@@ -130,20 +133,30 @@ export default function useAudioCapture({
     mediaStreamRef.current = null;
   }, []);
 
-  // Level meter for the UI only
+  // Level meter for the UI only. Updated ~15 times a second: every update
+  // re-renders the app on the same thread that forwards microphone audio.
+  const lastLevelRef = useRef({ at: 0, value: 0 });
   const visualize = useCallback((onLevelChange) => {
     if (!analyserRef.current || !isActiveRef.current) return;
 
-    const bufferLength = analyserRef.current.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    analyserRef.current.getByteTimeDomainData(dataArray);
+    const now = performance.now();
+    if (now - lastLevelRef.current.at >= LEVEL_UPDATE_MS) {
+      const bufferLength = analyserRef.current.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+      analyserRef.current.getByteTimeDomainData(dataArray);
 
-    let max = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const amplitude = Math.abs(dataArray[i] - 128);
-      if (amplitude > max) max = amplitude;
+      let max = 0;
+      for (let i = 0; i < bufferLength; i++) {
+        const amplitude = Math.abs(dataArray[i] - 128);
+        if (amplitude > max) max = amplitude;
+      }
+      const level = max / 128;
+      lastLevelRef.current.at = now;
+      if (Math.abs(level - lastLevelRef.current.value) >= 0.01) {
+        lastLevelRef.current.value = level;
+        onLevelChange?.(level);
+      }
     }
-    onLevelChange?.(max / 128);
 
     animationIdRef.current = requestAnimationFrame(() => visualize(onLevelChange));
   }, []);

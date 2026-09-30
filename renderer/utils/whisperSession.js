@@ -6,16 +6,20 @@ export const TRANSCRIPTION_MODEL = 'gpt-transcribe';
 const MAX_PROMPT_CONTEXT_CHARS = 240;
 const MAX_PROMPT_INSTRUCTION_CHARS = 400;
 
-// Continuous speech never gives VAD a pause, so the client commits on its own:
-// after SOFT_COMMIT_MS at the first short gap in speech, and at HARD_COMMIT_MS
-// regardless, so a run-on speaker still gets translated every few seconds.
+// Continuous speech never gives VAD a pause, so the client commits on its own.
+// Cutting inside a word loses it (each half is transcribed separately), so:
+// - after SOFT_COMMIT_MS, commit at the first short silence;
+// - after DIP_COMMIT_MS, commit at the first dip in loudness between words;
+// - at HARD_COMMIT_MS, commit regardless so run-on speech is still translated.
 export const SOFT_COMMIT_MS = 4000;
-export const HARD_COMMIT_MS = 8000;
+export const DIP_COMMIT_MS = 6000;
+export const HARD_COMMIT_MS = 10000;
 export const COMMIT_GAP_MS = 300;
 
-export function shouldForceCommit({ sinceCommitMs, hadSpeech, isQuiet }) {
+export function shouldForceCommit({ sinceCommitMs, hadSpeech, isQuiet, energyDipped = false }) {
   if (!hadSpeech) return false; // committing silence is what makes Whisper hallucinate
   if (sinceCommitMs >= HARD_COMMIT_MS) return true;
+  if (sinceCommitMs >= DIP_COMMIT_MS && (isQuiet || energyDipped)) return true;
   return sinceCommitMs >= SOFT_COMMIT_MS && isQuiet;
 }
 

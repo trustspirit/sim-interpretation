@@ -9,9 +9,11 @@ const MAX_BACKOFF_MS = 10000;
  * - After a successful open, any unexpected close reconnects with backoff until
  *   disconnect() is called. A failed reconnect never leaves the session dead.
  * - Audio sent while reconnecting is buffered (bounded) and flushed after the
- *   next open, so a session refresh doesn't drop the words spoken meanwhile.
- * - rotate() closes the socket on purpose and reconnects immediately; engines
- *   use it to refresh a session before the server's hard age limit.
+ *   next open, so a dropped connection doesn't drop the words spoken meanwhile.
+ * - rotate() refreshes the session without a gap: the replacement socket is
+ *   opened while audio keeps flowing to the current one, then audio switches
+ *   over and the old socket stays open for a grace period so speech it already
+ *   received is still transcribed (events arrive with `{ retired: true }`).
  */
 export function createRealtimeSocket({
   url,
@@ -19,9 +21,12 @@ export function createRealtimeSocket({
   onEvent,
   onStatus,
   onClose,
+  onRetire,
+  onRetireEnd,
   WebSocketImpl = globalThis.WebSocket,
   connectTimeoutMs = 8000,
-  maxBufferedMessages = 60,
+  maxBufferedMessages = 300,
+  retireGraceMs = 6000,
   backoffMs = DEFAULT_BACKOFF_MS,
   setTimeoutFn = (fn, ms) => setTimeout(fn, ms),
   clearTimeoutFn = (id) => clearTimeout(id),
@@ -33,8 +38,11 @@ export function createRealtimeSocket({
   let reconnectAttempt = 0;
   let openedAt = 0;
   let buffered = [];
+  let rotating = false;
+  const retired = new Map(); // socket -> grace timer
 
-  const isOpen = () => ws !== null && ws.readyState === WebSocketImpl.OPEN;
+  const isOpenSocket = (socket) => socket !== null && socket.readyState === WebSocketImpl.OPEN;
+  const isOpen = () => isOpenSocket(ws);
 
   const detach = (socket) => {
     socket.onopen = socket.onmessage = socket.onerror = socket.onclose = null;
@@ -54,8 +62,38 @@ export function createRealtimeSocket({
     for (const message of pending) ws.send(message);
   };
 
+  const endRetired = (socket) => {
+    if (!retired.has(socket)) return;
+    clearTimeoutFn(retired.get(socket));
+    retired.delete(socket);
+    detach(socket);
+    onRetireEnd?.();
+  };
+
+  const endAllRetired = () => {
+    for (const socket of [...retired.keys()]) endRetired(socket);
+  };
+
+  // Keep the old socket around only to receive results for audio it already has
+  const retire = (socket) => {
+    socket.onerror = null;
+    socket.onclose = () => endRetired(socket);
+    socket.onmessage = (e) => {
+      let event;
+      try { event = JSON.parse(e.data); } catch { return; }
+      onEvent?.(event, { retired: true });
+    };
+    const sendToOld = (data) => {
+      if (!isOpenSocket(socket)) return false;
+      socket.send(JSON.stringify(data));
+      return true;
+    };
+    retired.set(socket, setTimeoutFn(() => endRetired(socket), retireGraceMs));
+    onRetire?.(sendToOld);
+  };
+
   const scheduleReconnect = () => {
-    if (!active || reconnectTimer !== null) return;
+    if (!active || reconnectTimer !== null || rotating) return;
     const delay = backoffMs[reconnectAttempt] ?? MAX_BACKOFF_MS;
     reconnectAttempt += 1;
     onStatus?.('connecting', 'Reconnecting...');
@@ -67,8 +105,12 @@ export function createRealtimeSocket({
     }, delay);
   };
 
-  const open = () => new Promise((resolve, reject) => {
-    if (ws) {
+  /**
+   * Open a socket. With `replace`, the current socket keeps carrying audio
+   * until the new one is ready, and is then retired instead of closed.
+   */
+  const open = ({ replace = false } = {}) => new Promise((resolve, reject) => {
+    if (ws && !replace) {
       const old = ws;
       ws = null;
       detach(old);
@@ -76,7 +118,7 @@ export function createRealtimeSocket({
 
     let settled = false;
     const socket = new WebSocketImpl(url, ['realtime', `openai-insecure-api-key.${apiKey}`]);
-    ws = socket;
+    if (!replace) ws = socket;
 
     const fail = (reason) => {
       if (settled) return;
@@ -93,6 +135,14 @@ export function createRealtimeSocket({
       if (settled) return;
       settled = true;
       clearTimeoutFn(timeoutId);
+      if (!active) {
+        detach(socket);
+        reject(new Error('Disconnected'));
+        return;
+      }
+      const previous = ws;
+      ws = socket;
+      if (replace && previous && previous !== socket) retire(previous);
       openedAt = Date.now();
       reconnectAttempt = 0;
       onOpen?.();
@@ -107,7 +157,7 @@ export function createRealtimeSocket({
       } catch {
         return;
       }
-      onEvent?.(event);
+      onEvent?.(event, { retired: false });
     };
 
     socket.onerror = () => fail('Connection error');
@@ -141,7 +191,9 @@ export function createRealtimeSocket({
       active = false;
       apiKey = null;
       buffered = [];
+      rotating = false;
       clearReconnect();
+      endAllRetired();
       if (ws) {
         const socket = ws;
         ws = null;
@@ -150,16 +202,19 @@ export function createRealtimeSocket({
       }
     },
 
-    /** Close the current socket and reconnect right away (session refresh). */
+    /** Refresh the session without interrupting the audio stream. */
     rotate() {
-      if (!active || !ws) return;
-      const socket = ws;
-      ws = null;
-      detach(socket);
-      onClose?.({ intentional: false, rotated: true });
-      clearReconnect();
-      reconnectAttempt = 0;
-      open().catch(() => scheduleReconnect());
+      if (!active || !isOpen() || rotating) return;
+      rotating = true;
+      open({ replace: true })
+        .catch(() => {
+          // Replacement failed: if the current socket died meanwhile, reconnect normally
+          if (!isOpen()) {
+            rotating = false;
+            scheduleReconnect();
+          }
+        })
+        .finally(() => { rotating = false; });
     },
 
     send(data) {
@@ -182,6 +237,7 @@ export function createRealtimeSocket({
 
     isOpen,
     isActive: () => active,
+    isRotating: () => rotating,
     sessionAgeMs: () => (openedAt ? Date.now() - openedAt : 0),
   };
 }

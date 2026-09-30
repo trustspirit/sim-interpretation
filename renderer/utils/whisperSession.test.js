@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  buildTranscriptionConfig, buildSessionConfig, shouldForceCommit, SOFT_COMMIT_MS, HARD_COMMIT_MS,
+  buildTranscriptionConfig, buildSessionConfig, shouldForceCommit, SOFT_COMMIT_MS, DIP_COMMIT_MS, HARD_COMMIT_MS,
 } from './whisperSession';
 
 const base = { langA: 'en', langB: 'ko', customInstruction: '', recentTranscripts: [] };
@@ -70,6 +70,13 @@ describe('shouldForceCommit', () => {
     expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS - 1, hadSpeech: true, isQuiet: true })).toBe(false);
     expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS, hadSpeech: true, isQuiet: false })).toBe(false);
     expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS, hadSpeech: true, isQuiet: true })).toBe(true);
+  });
+
+  it('commits at a dip between words once past the dip limit', () => {
+    const args = { hadSpeech: true, isQuiet: false, energyDipped: true };
+    expect(shouldForceCommit({ ...args, sinceCommitMs: SOFT_COMMIT_MS })).toBe(false);
+    expect(shouldForceCommit({ ...args, sinceCommitMs: DIP_COMMIT_MS })).toBe(true);
+    expect(shouldForceCommit({ ...args, energyDipped: false, sinceCommitMs: DIP_COMMIT_MS })).toBe(false);
   });
 
   it('commits run-on speech at the hard limit even without a pause', () => {

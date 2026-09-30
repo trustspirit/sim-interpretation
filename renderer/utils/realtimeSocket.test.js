@@ -135,15 +135,53 @@ describe('createRealtimeSocket', () => {
     expect(closes[0]).toMatchObject({ intentional: false });
   });
 
-  it('rotate() replaces the socket immediately', async () => {
-    const { socket, closes } = setup();
+  it('rotate() keeps audio flowing to the old socket until the new one is open', async () => {
+    const retiredSends = [];
+    const onRetire = vi.fn((sendToOld) => retiredSends.push(sendToOld({ type: 'input_audio_buffer.commit' })));
+    const onRetireEnd = vi.fn();
+    const { socket, events } = setup({ onRetire, onRetireEnd, retireGraceMs: 50 });
     const p = socket.connect('sk-test');
-    latest().serverOpen();
+    const first = latest();
+    first.serverOpen();
     await p;
+
     socket.rotate();
-    expect(FakeWebSocket.instances).toHaveLength(2);
-    expect(closes.at(-1)).toMatchObject({ rotated: true });
+    const second = latest();
+    expect(second).not.toBe(first);
+    // Still connecting: audio goes to the old socket, nothing is buffered or lost
+    socket.sendBuffered({ n: 1 });
+    expect(first.sent.map((m) => m.n)).toEqual([1]);
+
+    second.serverOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.sendBuffered({ n: 2 });
+    expect(second.sent.map((m) => m.n)).toEqual([2]);
+    // Old socket was asked to commit what it had, and still delivers its results
+    expect(first.sent.at(-1)).toEqual({ type: 'input_audio_buffer.commit' });
+    expect(retiredSends).toEqual([true]);
+    first.serverMessage({ type: 'late.result' });
+    expect(events.at(-1)).toEqual({ type: 'late.result' });
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(onRetireEnd).toHaveBeenCalledTimes(1);
+    expect(first.readyState).toBe(FakeWebSocket.CLOSED);
+    expect(socket.isOpen()).toBe(true);
+  });
+
+  it('rotate() falls back to a normal reconnect if both sockets fail', async () => {
+    const { socket } = setup();
+    const p = socket.connect('sk-test');
+    const first = latest();
+    first.serverOpen();
+    await p;
+
+    socket.rotate();
+    first.serverClose(); // old one dies while the replacement is connecting
+    socket.sendBuffered({ n: 1 }); // buffered, not dropped
+    latest().serverFail();
+    await vi.advanceTimersByTimeAsync(10);
     latest().serverOpen();
     expect(socket.isOpen()).toBe(true);
+    expect(latest().sent.map((m) => m.n)).toEqual([1]);
   });
 });
