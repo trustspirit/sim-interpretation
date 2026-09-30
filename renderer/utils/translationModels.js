@@ -29,11 +29,11 @@ const MODEL_REJECTION_CODES = new Set([
  */
 export function isModelRejection(status, error) {
   if (status === 404) return true;
-  if (status !== 400 && status !== 403) return false;
-  if (!error) return false;
-  if (MODEL_REJECTION_CODES.has(error.code)) return true;
-  if (MODEL_REJECTION_PARAMS.has(error.param)) return true;
-  return /model|not supported|unsupported|does not exist|do not have access/i.test(error.message || '');
+  if (status === 403) return true; // no access to this model
+  if (status !== 400 || !error) return false;
+  // Only the server's own classification: a one-off 400 whose message merely
+  // mentions "model" (e.g. "The model produced invalid content") is transient.
+  return MODEL_REJECTION_CODES.has(error.code) || MODEL_REJECTION_PARAMS.has(error.param);
 }
 
 export function createModelSelector(models = TRANSLATION_MODELS) {

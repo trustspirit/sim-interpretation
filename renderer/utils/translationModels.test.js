@@ -42,7 +42,12 @@ describe('isModelRejection', () => {
   it('treats unknown models and unsupported parameters as rejections', () => {
     expect(isModelRejection(404, { message: 'The model `x` does not exist' })).toBe(true);
     expect(isModelRejection(400, { code: 'unsupported_value', param: 'reasoning_effort' })).toBe(true);
-    expect(isModelRejection(400, { message: "Unsupported parameter: 'temperature'" })).toBe(true);
+    expect(isModelRejection(400, { code: 'unsupported_parameter', param: 'temperature' })).toBe(true);
+    expect(isModelRejection(403, { message: 'Project does not have access to model' })).toBe(true);
+  });
+
+  it('does not demote a model on a transient 400 that merely mentions "model"', () => {
+    expect(isModelRejection(400, { message: 'The model produced invalid content. Consider retrying.' })).toBe(false);
   });
 
   it('ignores transient and content errors', () => {

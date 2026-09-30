@@ -21,7 +21,7 @@ const TRANSCRIPT_SPEECH_WINDOW_MS = 8000;
 // The translation trails the source speech, so it gets a wider window
 const TRANSLATION_SPEECH_WINDOW_MS = 20000;
 
-const IGNORED_ERROR_FRAGMENTS = ['no active response', 'buffer too small'];
+const IGNORED_ERRORS = [/no active response/i, /buffer too small/i];
 
 // The translations endpoint only accepts audio.output.language (see OpenAI docs):
 // no bidirectional auto mode, no custom instructions, no voice choice.
@@ -175,7 +175,7 @@ export default function useRealtimeTranslateEngine({
 
       case 'response.done': {
         const status = event.response?.status;
-        if (status === 'failed') {
+        if (status === 'failed' && !retired) {
           const message = event.response?.status_details?.error?.message || 'Realtime response failed';
           console.error('[RealtimeTranslate] Response failed:', message);
           errorShownRef.current = true;
@@ -186,8 +186,9 @@ export default function useRealtimeTranslateEngine({
 
       case 'error': {
         const message = event.error?.message || '';
-        if (IGNORED_ERROR_FRAGMENTS.some((f) => message.includes(f))) break;
+        if (IGNORED_ERRORS.some((re) => re.test(message))) break;
         console.error('[RealtimeTranslate] Server error:', message);
+        if (retired) break; // a draining session's errors don't concern the live one
         errorShownRef.current = true;
         onStatusChangeRef.current?.('error', message || 'Error');
         break;

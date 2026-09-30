@@ -185,3 +185,24 @@ describe('createRealtimeSocket', () => {
     expect(latest().sent.map((m) => m.n)).toEqual([1]);
   });
 });
+
+describe('createRealtimeSocket: stale attempts', () => {
+  beforeEach(() => { FakeWebSocket.instances = []; vi.useFakeTimers(); });
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
+
+  it('a connect attempt cancelled by Stop cannot deactivate the next Start', async () => {
+    const { socket } = setup({ connectTimeoutMs: 8000 });
+    const first = socket.connect('sk-test'); // slow network: never opens
+    first.catch(() => {});
+    socket.disconnect();
+
+    const second = socket.connect('sk-test');
+    latest().serverOpen();
+    await expect(second).resolves.toBe(true);
+
+    await vi.advanceTimersByTimeAsync(8000); // the first attempt's timeout fires now
+    expect(socket.isActive()).toBe(true);
+    expect(socket.isOpen()).toBe(true);
+    expect(socket.send({ type: 'ping' })).toBe(true);
+  });
+});

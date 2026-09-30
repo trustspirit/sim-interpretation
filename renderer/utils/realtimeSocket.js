@@ -39,6 +39,7 @@ export function createRealtimeSocket({
   let openedAt = 0;
   let buffered = [];
   let rotating = false;
+  let connectSeq = 0; // bumped by connect()/disconnect() so a stale attempt can't act on a newer session
   const retired = new Map(); // socket -> grace timer
 
   const isOpenSocket = (socket) => socket !== null && socket.readyState === WebSocketImpl.OPEN;
@@ -176,18 +177,22 @@ export function createRealtimeSocket({
   return {
     connect(key) {
       if (!key) return Promise.reject(new Error('API Key not found'));
+      const seq = ++connectSeq;
       apiKey = key;
       active = true;
       reconnectAttempt = 0;
       clearReconnect();
       return open().catch((err) => {
-        // The initial attempt is retried by the caller, not here
-        active = false;
+        // The initial attempt is retried by the caller, not here. A stale
+        // attempt (disconnect() or a newer connect() happened meanwhile)
+        // leaves the current session alone.
+        if (seq === connectSeq) active = false;
         throw err;
       });
     },
 
     disconnect() {
+      connectSeq += 1;
       active = false;
       apiKey = null;
       buffered = [];

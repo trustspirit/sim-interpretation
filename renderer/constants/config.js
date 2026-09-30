@@ -148,15 +148,27 @@ export const isTranslationEcho = (transcript, recentTranslations) => {
   });
 };
 
-// The transcription prompt carries recent transcripts as context. On silence or
-// noise the model sometimes "transcribes" that prompt back; drop such repeats.
-const PROMPT_LEAK_MIN_CHARS = 12;
+// The transcription prompt carries the user's glossary and recent transcripts.
+// On noise the model sometimes "transcribes" that prompt back. A speaker can
+// legitimately repeat their last line, so only two things count as a leak:
+// reading back two or more context lines in a row, or reading back the glossary.
+const PROMPT_LEAK_MIN_CHARS = 20;
 
-export const isPromptLeak = (transcript, promptContext) => {
-  if (!transcript || !promptContext?.length) return false;
+export const isPromptLeak = (transcript, { recentTranscripts = [], customInstruction = '' } = {}) => {
+  if (!transcript) return false;
   const needle = normalizeForEcho(transcript);
   if (needle.length < PROMPT_LEAK_MIN_CHARS) return false;
-  return normalizeForEcho(promptContext.join(' ')).includes(needle);
+
+  const instruction = normalizeForEcho(customInstruction || '');
+  if (instruction.length >= PROMPT_LEAK_MIN_CHARS && (instruction === needle || instruction.includes(needle))) {
+    return true;
+  }
+
+  const lines = recentTranscripts.map(normalizeForEcho).filter(Boolean);
+  for (let i = 0; i + 1 < lines.length; i++) {
+    if (needle.includes(lines[i] + lines[i + 1])) return true;
+  }
+  return false;
 };
 
 // The model answering or refusing instead of translating. Keep this list to

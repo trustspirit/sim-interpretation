@@ -45,8 +45,9 @@ const TRANSLATION_ATTEMPT_TIMEOUT_MS = 6000;
 const TRANSLATION_MAX_ATTEMPTS = 2;
 const TTS_MODEL = 'gpt-4o-mini-tts-2025-12-15';
 
-// Server errors that don't affect the session
-const IGNORED_ERROR_FRAGMENTS = ['no active response', 'buffer too small', 'not found'];
+// Server errors that don't affect the session (an empty commit, or deleting an
+// item the server already dropped). Anything else, e.g. a rejected model, is shown.
+const IGNORED_ERRORS = [/no active response/i, /buffer too small/i, /item.*(not found|does not exist)/i];
 
 export const capabilities = {
   autoDirection: true,
@@ -468,7 +469,10 @@ export default function useWhisperEngine({
       console.log('[Whisper] Blocked hallucination:', transcript.substring(0, 50));
       return;
     }
-    if (isPromptLeak(transcript, recentTranscriptsRef.current)) {
+    if (isPromptLeak(transcript, {
+      recentTranscripts: recentTranscriptsRef.current,
+      customInstruction: customInstructionRef.current,
+    })) {
       console.log('[Whisper] Blocked prompt leak:', transcript.substring(0, 50));
       return;
     }
@@ -538,8 +542,9 @@ export default function useWhisperEngine({
 
       case 'error': {
         const message = event.error?.message || '';
-        if (IGNORED_ERROR_FRAGMENTS.some((f) => message.includes(f))) break;
+        if (IGNORED_ERRORS.some((re) => re.test(message))) break;
         console.error('[Whisper] Server error:', message);
+        if (retired) break; // a draining session's errors don't concern the live one
         errorShownRef.current = true;
         onStatusChangeRef.current?.('error', message || 'Error');
         break;

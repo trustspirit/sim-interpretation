@@ -141,10 +141,20 @@ describe('isRepeatedTranscription', () => {
 });
 
 describe('isPromptLeak', () => {
-  it('drops a transcript that is the context prompt read back', () => {
-    const ctx = ['We deploy on Kubernetes every Friday.', 'Then we scale the cluster.'];
-    expect(isPromptLeak('Then we scale the cluster.', ctx)).toBe(true);
-    expect(isPromptLeak('Then we scale down.', ctx)).toBe(false);
-    expect(isPromptLeak('Yes.', ['Yes.'])).toBe(false);
+  const recentTranscripts = ['We deploy on Kubernetes every Friday.', 'Then we scale the cluster.'];
+  const customInstruction = 'Terms: Kubernetes, Overdare, Helm charts';
+
+  it('drops the context prompt read back as a whole', () => {
+    expect(isPromptLeak('We deploy on Kubernetes every Friday. Then we scale the cluster.', { recentTranscripts })).toBe(true);
+  });
+
+  it('drops the glossary read back', () => {
+    expect(isPromptLeak('Terms: Kubernetes, Overdare, Helm charts', { customInstruction })).toBe(true);
+  });
+
+  it('keeps a speaker repeating their own last line', () => {
+    expect(isPromptLeak('Then we scale the cluster.', { recentTranscripts })).toBe(false);
+    expect(isPromptLeak('Can you hear me now? Can you hear me now?', { recentTranscripts: ['Can you hear me now?'] })).toBe(false);
+    expect(isPromptLeak('Yes.', { recentTranscripts: ['Yes.'] })).toBe(false);
   });
 });
