@@ -3,12 +3,24 @@ import {
   isHallucination,
   isRepeatedTranscription,
 } from '../../constants';
+import { createRealtimeSocket } from '../../utils/realtimeSocket';
+import { createStreamSegmenter } from '../../utils/sentences';
 
-const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
-const IDLE_THRESHOLD_MS = 10 * 1000;
-const TRANSCRIPT_FLUSH_MS = 900;
+const TRANSLATE_URL = 'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate';
+const SESSION_SOFT_MAX_AGE_MS = 25 * 60 * 1000;
+const SESSION_HARD_MAX_AGE_MS = 29 * 60 * 1000;
+const ROTATE_QUIET_MS = 3000;
+const SESSION_CHECK_INTERVAL_MS = 5000;
+// Deltas are grouped into lines: complete sentences go out immediately, a
+// fragment after SEGMENT_IDLE_MS of silence, and run-on speech every SEGMENT_MAX_AGE_MS.
+const SEGMENT_IDLE_MS = 900;
+const SEGMENT_MAX_AGE_MS = 3500;
 // A transcript arriving with no microphone energy in this window is a silence hallucination.
 const TRANSCRIPT_SPEECH_WINDOW_MS = 8000;
+// The translation trails the source speech, so it gets a wider window
+const TRANSLATION_SPEECH_WINDOW_MS = 20000;
+
+const IGNORED_ERROR_FRAGMENTS = ['no active response', 'buffer too small'];
 
 // The translations endpoint only accepts audio.output.language (see OpenAI docs):
 // no bidirectional auto mode, no custom instructions, no voice choice.
@@ -29,26 +41,11 @@ export default function useRealtimeTranslateEngine({
   langA, langB, direction, isVoiceMode, speechActivity,
   onTranscript, onTranslation, onAudioChunk, onAudioDone, onStatusChange, onDisconnect,
 }) {
-  // WebSocket state
-  const wsRef = useRef(null);
-  const apiKeyRef = useRef(null);
-  const reconnectTimeoutRef = useRef(null);
-  const pingIntervalRef = useRef(null);
-  const sessionRefreshIntervalRef = useRef(null);
-  const isIntentionalCloseRef = useRef(false);
-  const hasRejectedRef = useRef(false);
-  const connectedOnceRef = useRef(false);
-  const lastActivityRef = useRef(Date.now());
-  const sessionStartRef = useRef(Date.now());
+  const hasOpenedRef = useRef(false);
+  const errorShownRef = useRef(false);
+  const sessionCheckIntervalRef = useRef(null);
 
-  // Translation endpoint streams transcript deltas without sentence objects.
-  // Debounce them into readable chunks before adding to the transcript list.
-  const inputTranscriptBufferRef = useRef('');
-  const outputTranscriptBufferRef = useRef('');
-  const inputFlushTimeoutRef = useRef(null);
-  const outputFlushTimeoutRef = useRef(null);
-
-  // Store callbacks in refs so WebSocket closures always see latest version
+  // Store callbacks in refs so socket closures always see latest version
   const onTranscriptRef = useRef(onTranscript);
   const onTranslationRef = useRef(onTranslation);
   const onAudioChunkRef = useRef(onAudioChunk);
@@ -74,31 +71,13 @@ export default function useRealtimeTranslateEngine({
   isVoiceModeRef.current = isVoiceMode;
   speechActivityRef.current = speechActivity;
 
-  const send = useCallback((data) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-      return true;
-    }
-    return false;
-  }, []);
-
-  const commitAudio = useCallback(() => true, []);
-
   const getTargetLanguage = useCallback(() => {
     const dir = directionRef.current;
     if (dir === 'b-to-a') return langARef.current;
     return langBRef.current;
   }, []);
 
-  const flushInputTranscript = useCallback(() => {
-    if (inputFlushTimeoutRef.current) {
-      clearTimeout(inputFlushTimeoutRef.current);
-      inputFlushTimeoutRef.current = null;
-    }
-
-    const transcript = inputTranscriptBufferRef.current.trim();
-    inputTranscriptBufferRef.current = '';
-    if (!transcript) return;
+  const emitInputSegment = useCallback((transcript) => {
     const tracker = speechActivityRef.current;
     if (tracker && !tracker.hadSpeechWithin(TRANSCRIPT_SPEECH_WINDOW_MS)) {
       console.log('[RealtimeTranslate] Blocked (no mic activity):', transcript.substring(0, 50));
@@ -116,17 +95,9 @@ export default function useRealtimeTranslateEngine({
     onTranscriptRef.current?.(transcript);
   }, []);
 
-  const flushOutputTranscript = useCallback(() => {
-    if (outputFlushTimeoutRef.current) {
-      clearTimeout(outputFlushTimeoutRef.current);
-      outputFlushTimeoutRef.current = null;
-    }
-
-    const translation = outputTranscriptBufferRef.current.trim();
-    outputTranscriptBufferRef.current = '';
-    if (!translation) return;
+  const emitOutputSegment = useCallback((translation) => {
     const tracker = speechActivityRef.current;
-    if (tracker && !tracker.hadSpeechWithin(TRANSCRIPT_SPEECH_WINDOW_MS)) {
+    if (tracker && !tracker.hadSpeechWithin(TRANSLATION_SPEECH_WINDOW_MS)) {
       console.log('[RealtimeTranslate] Blocked translation (no mic activity):', translation.substring(0, 50));
       return;
     }
@@ -134,34 +105,50 @@ export default function useRealtimeTranslateEngine({
     onTranslationRef.current?.(translation);
   }, []);
 
+  const emitInputSegmentRef = useRef(emitInputSegment);
+  const emitOutputSegmentRef = useRef(emitOutputSegment);
+  emitInputSegmentRef.current = emitInputSegment;
+  emitOutputSegmentRef.current = emitOutputSegment;
+
+  const segmentersRef = useRef(null);
+  if (!segmentersRef.current) {
+    const options = { idleMs: SEGMENT_IDLE_MS, maxAgeMs: SEGMENT_MAX_AGE_MS };
+    segmentersRef.current = {
+      input: createStreamSegmenter({ ...options, onSegment: (t) => emitInputSegmentRef.current(t) }),
+      output: createStreamSegmenter({ ...options, onSegment: (t) => emitOutputSegmentRef.current(t) }),
+    };
+  }
+
+  const flushSegments = useCallback(() => {
+    segmentersRef.current.input.flush();
+    segmentersRef.current.output.flush();
+  }, []);
+
   const handleServerEvent = useCallback((event) => {
     if (['error', 'session.updated', 'session.created'].includes(event.type)) {
       console.log('[RealtimeTranslate Event]', event.type, JSON.stringify(event).substring(0, 200));
     }
+    const { input, output } = segmentersRef.current;
 
     switch (event.type) {
       case 'session.input_transcript.delta':
-        if (event.delta) {
-          inputTranscriptBufferRef.current += event.delta;
-          if (inputFlushTimeoutRef.current) clearTimeout(inputFlushTimeoutRef.current);
-          inputFlushTimeoutRef.current = setTimeout(flushInputTranscript, TRANSCRIPT_FLUSH_MS);
-        }
+        input.push(event.delta);
         break;
 
       case 'session.input_transcript.done':
-        flushInputTranscript();
+        input.flush();
         break;
 
       case 'session.output_transcript.delta':
-        if (event.delta) {
-          outputTranscriptBufferRef.current += event.delta;
-          if (outputFlushTimeoutRef.current) clearTimeout(outputFlushTimeoutRef.current);
-          outputFlushTimeoutRef.current = setTimeout(flushOutputTranscript, TRANSCRIPT_FLUSH_MS);
+        if (event.delta && errorShownRef.current) {
+          errorShownRef.current = false;
+          onStatusChangeRef.current?.('connected', 'Speak now');
         }
+        output.push(event.delta);
         break;
 
       case 'session.output_transcript.done':
-        flushOutputTranscript();
+        output.flush();
         break;
 
       case 'session.output_audio.delta':
@@ -174,177 +161,122 @@ export default function useRealtimeTranslateEngine({
 
       case 'response.done': {
         const status = event.response?.status;
-        console.log('[RealtimeTranslate] Response done:', status);
         if (status === 'failed') {
           const message = event.response?.status_details?.error?.message || 'Realtime response failed';
           console.error('[RealtimeTranslate] Response failed:', message);
+          errorShownRef.current = true;
           onStatusChangeRef.current?.('error', message);
         }
         break;
       }
 
-      case 'error':
-        if (
-          event.error?.message?.includes('no active response') ||
-          event.error?.message?.includes('buffer too small')
-        ) break;
-        console.error('[RealtimeTranslate] Server error:', event.error?.message);
-        onStatusChangeRef.current?.('error', event.error?.message || 'Error');
+      case 'error': {
+        const message = event.error?.message || '';
+        if (IGNORED_ERROR_FRAGMENTS.some((f) => message.includes(f))) break;
+        console.error('[RealtimeTranslate] Server error:', message);
+        errorShownRef.current = true;
+        onStatusChangeRef.current?.('error', message || 'Error');
         break;
+      }
     }
-  }, [flushInputTranscript, flushOutputTranscript]);
+  }, []);
 
-  const connect = useCallback((apiKey) => {
-    return new Promise((resolve, reject) => {
-      if (!apiKey) {
-        onStatusChangeRef.current?.('error', 'API Key missing');
-        reject(new Error('API Key not found'));
-        return;
-      }
+  const socketHandlersRef = useRef({});
+  const socketRef = useRef(null);
+  if (!socketRef.current) {
+    socketRef.current = createRealtimeSocket({
+      url: TRANSLATE_URL,
+      onOpen: () => socketHandlersRef.current.onOpen?.(),
+      onEvent: (event) => socketHandlersRef.current.onEvent?.(event),
+      onClose: (info) => socketHandlersRef.current.onClose?.(info),
+      onStatus: (state, text) => onStatusChangeRef.current?.(state, text),
+    });
+  }
 
-      apiKeyRef.current = apiKey;
-      isIntentionalCloseRef.current = false;
-      hasRejectedRef.current = false;
-      connectedOnceRef.current = false;
+  const send = useCallback((data) => socketRef.current.send(data), []);
+  const commitAudio = useCallback(() => true, []);
 
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-
-      if (wsRef.current) {
-        const oldWs = wsRef.current;
-        wsRef.current = null;
-        oldWs.onopen = oldWs.onmessage = oldWs.onerror = oldWs.onclose = null;
-        oldWs.close();
-      }
-
-      const timeoutId = setTimeout(() => {
-        wsRef.current = null;
-        ws.onopen = ws.onerror = ws.onclose = null;
-        ws.close();
-        reject(new Error('Connection timeout'));
-      }, 5000);
-
-      const ws = new WebSocket(
-        'wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate',
-        ['realtime', `openai-insecure-api-key.${apiKey}`]
-      );
-
-      ws.onopen = () => {
-        clearTimeout(timeoutId);
-        connectedOnceRef.current = true;
-        onStatusChangeRef.current?.('connected', 'Connected');
-
-        const sessionConfig = {
+  socketHandlersRef.current = {
+    onOpen: () => {
+      send({
+        type: 'session.update',
+        session: {
           audio: {
             input: { noise_reduction: { type: 'near_field' } },
             output: { language: getTargetLanguage() },
           },
-        };
+        },
+      });
+      errorShownRef.current = false;
+      onStatusChangeRef.current?.('connected', hasOpenedRef.current ? 'Speak now' : 'Connected');
+      hasOpenedRef.current = true;
+    },
+    onEvent: handleServerEvent,
+    onClose: () => {
+      // Deltas from the closed session will never be completed; show what arrived
+      flushSegments();
+      onDisconnectRef.current?.();
+    },
+  };
 
-        ws.send(JSON.stringify({ type: 'session.update', session: sessionConfig }));
+  // Refresh the session before the server's age limit, preferably during a pause
+  const checkSession = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket.isOpen()) return;
+    const age = socket.sessionAgeMs();
+    const tracker = speechActivityRef.current;
+    const longQuiet = tracker ? !tracker.hadSpeechWithin(ROTATE_QUIET_MS) : true;
+    if ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS) {
+      console.log('[RealtimeTranslate] Refreshing session');
+      socket.rotate();
+    }
+  }, []);
 
-        pingIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-              type: 'session.update',
-              session: { audio: { output: { language: getTargetLanguage() } } },
-            }));
-          }
-        }, 30000);
+  const stopSessionCheck = useCallback(() => {
+    if (sessionCheckIntervalRef.current) {
+      clearInterval(sessionCheckIntervalRef.current);
+      sessionCheckIntervalRef.current = null;
+    }
+  }, []);
 
-        sessionStartRef.current = Date.now();
-        if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
-        sessionRefreshIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN && apiKeyRef.current) {
-            const now = Date.now();
-            if (
-              now - sessionStartRef.current >= SESSION_MAX_AGE_MS &&
-              now - lastActivityRef.current >= IDLE_THRESHOLD_MS
-            ) {
-              wsRef.current.close();
-            }
-          }
-        }, 60000);
-
-        resolve(true);
-      };
-
-      ws.onmessage = (e) => {
-        const event = JSON.parse(e.data);
-        handleServerEvent(event);
-      };
-
-      ws.onerror = () => {
-        clearTimeout(timeoutId);
-        if (!connectedOnceRef.current) {
-          hasRejectedRef.current = true;
-          onStatusChangeRef.current?.('error', 'Connection error');
-          reject(new Error('Connection error'));
-        }
-      };
-
-      ws.onclose = () => {
-        clearTimeout(timeoutId);
-        if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
-        if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
-
-        // Reject promise if closed before ever opening (e.g. disconnect() during CONNECTING)
-        if (!connectedOnceRef.current && !hasRejectedRef.current) {
-          hasRejectedRef.current = true;
-          reject(new Error('Connection closed before opening'));
-          return;
-        }
-
-        flushInputTranscript();
-        flushOutputTranscript();
-        onDisconnectRef.current?.();
-
-        if (!isIntentionalCloseRef.current && !hasRejectedRef.current && apiKeyRef.current) {
-          onStatusChangeRef.current?.('connecting', 'Reconnecting...');
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect(apiKeyRef.current).catch(() => {
-              onStatusChangeRef.current?.('error', 'Reconnect failed');
-            });
-          }, 1500);
-        }
-      };
-
-      wsRef.current = ws;
-    });
-  }, [getTargetLanguage, handleServerEvent, flushInputTranscript, flushOutputTranscript]);
+  const connect = useCallback((apiKey) => {
+    if (!apiKey) {
+      onStatusChangeRef.current?.('error', 'API Key missing');
+      return Promise.reject(new Error('API Key not found'));
+    }
+    hasOpenedRef.current = false;
+    return socketRef.current.connect(apiKey)
+      .then((result) => {
+        stopSessionCheck();
+        sessionCheckIntervalRef.current = setInterval(checkSession, SESSION_CHECK_INTERVAL_MS);
+        return result;
+      })
+      .catch((err) => {
+        onStatusChangeRef.current?.('error', err.message);
+        throw err;
+      });
+  }, [checkSession, stopSessionCheck]);
 
   const disconnect = useCallback(() => {
-    isIntentionalCloseRef.current = true;
-    apiKeyRef.current = null;
-    if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
-    if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
-    if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
-    flushInputTranscript();
-    flushOutputTranscript();
-    wsRef.current?.close();
-    wsRef.current = null;
-  }, [flushInputTranscript, flushOutputTranscript]);
+    stopSessionCheck();
+    socketRef.current.disconnect();
+    flushSegments();
+  }, [stopSessionCheck, flushSegments]);
 
   // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
   useEffect(() => {
     return () => {
-      isIntentionalCloseRef.current = true;
-      apiKeyRef.current = null;
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-      if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
-      if (inputFlushTimeoutRef.current) clearTimeout(inputFlushTimeoutRef.current);
-      if (outputFlushTimeoutRef.current) clearTimeout(outputFlushTimeoutRef.current);
-      wsRef.current?.close();
+      stopSessionCheck();
+      socketRef.current.disconnect();
+      segmentersRef.current.input.reset();
+      segmentersRef.current.output.reset();
     };
-  }, []);
+  }, [stopSessionCheck]);
 
-  const sendAudio = useCallback((base64Audio) => {
-    lastActivityRef.current = Date.now();
-    return send({ type: 'session.input_audio_buffer.append', audio: base64Audio });
-  }, [send]);
+  // Audio is buffered while the socket reconnects, then flushed in order
+  const sendAudio = useCallback((base64Audio) => (
+    socketRef.current.sendBuffered({ type: 'session.input_audio_buffer.append', audio: base64Audio })
+  ), []);
 
   // No-op for Realtime Translate. The translation session consumes continuous audio.
   const startForceCommitTimer = useCallback(() => {}, []);

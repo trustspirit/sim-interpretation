@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { buildTranscriptionConfig, buildSessionConfig } from './whisperSession';
+import {
+  buildTranscriptionConfig, buildSessionConfig, shouldForceCommit, SOFT_COMMIT_MS, HARD_COMMIT_MS,
+} from './whisperSession';
 
 const base = { langA: 'en', langB: 'ko', customInstruction: '', recentTranscripts: [] };
 
@@ -46,5 +48,31 @@ describe('buildSessionConfig', () => {
         },
       },
     });
+  });
+});
+
+describe('buildTranscriptionConfig context size', () => {
+  it('keeps only the tail of long context, starting at a word', () => {
+    const long = Array.from({ length: 40 }, (_, i) => `sentence number ${i}.`);
+    const cfg = buildTranscriptionConfig({ ...base, direction: 'auto', recentTranscripts: long });
+    expect(cfg.prompt.length).toBeLessThanOrEqual(240);
+    expect(cfg.prompt.endsWith('sentence number 39.')).toBe(true);
+    expect(cfg.prompt).not.toContain('sentence number 0.');
+  });
+});
+
+describe('shouldForceCommit', () => {
+  it('never commits a buffer without speech', () => {
+    expect(shouldForceCommit({ sinceCommitMs: 60000, hadSpeech: false, isQuiet: true })).toBe(false);
+  });
+
+  it('waits for a short pause after the soft limit', () => {
+    expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS - 1, hadSpeech: true, isQuiet: true })).toBe(false);
+    expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS, hadSpeech: true, isQuiet: false })).toBe(false);
+    expect(shouldForceCommit({ sinceCommitMs: SOFT_COMMIT_MS, hadSpeech: true, isQuiet: true })).toBe(true);
+  });
+
+  it('commits run-on speech at the hard limit even without a pause', () => {
+    expect(shouldForceCommit({ sinceCommitMs: HARD_COMMIT_MS, hadSpeech: true, isQuiet: false })).toBe(true);
   });
 });

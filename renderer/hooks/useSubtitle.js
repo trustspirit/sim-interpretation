@@ -8,7 +8,6 @@ export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
   // Each entry carries its own display time, computed when it was enqueued
   const queueRef = useRef([]);
   const timerRef = useRef(null);
-  const lastProcessedIndexRef = useRef(-1);
   const isProcessingRef = useRef(false);
   const pendingStartRef = useRef(false);
 
@@ -50,8 +49,8 @@ export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
     queueRef.current = [];
     setQueue([]);
     setCurrentSubtitle('');
-    lastProcessedIndexRef.current = -1;
     isProcessingRef.current = false;
+    pendingStartRef.current = false;
     if (timerRef.current) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
@@ -84,7 +83,5 @@ export default function useSubtitle({ isEnabled, maxCharsPerLine = 50 }) {
     setPendingStart: (value) => { pendingStartRef.current = value; },
     isPendingStart: () => pendingStartRef.current,
     hasQueue: () => queueRef.current.length > 0,
-    getLastProcessedIndex: () => lastProcessedIndexRef.current,
-    setLastProcessedIndex: (index) => { lastProcessedIndexRef.current = index; },
   }), [currentSubtitle, queue, addTranslation, startProcessing, clear]);
 }

@@ -1,30 +1,48 @@
 import { useRef, useEffect, useCallback } from 'react';
 import {
-  getLanguageName,
   isHallucination,
   isAssistantResponse,
   isRepeatedTranscription,
   isTranslationEcho,
+  isPromptLeak,
   cleanTranslation,
   stripSourcePrefix,
   isLikelyEcho,
 } from '../../constants';
-import { buildTranscriptionConfig, buildSessionConfig } from '../../utils/whisperSession';
+import {
+  buildTranscriptionConfig, buildSessionConfig, shouldForceCommit, COMMIT_GAP_MS,
+} from '../../utils/whisperSession';
+import {
+  buildTranslationMessages, parseTranslationContent, resolveTargetLanguage, TRANSLATION_RESPONSE_FORMAT,
+} from '../../utils/translationPrompt';
 import { extractCompleteSentences } from '../../utils/sentences';
 import { createOrderedEmitter } from '../../utils/orderedEmitter';
 import { createPcmChunker } from '../../utils/pcmChunker';
+import { createRealtimeSocket } from '../../utils/realtimeSocket';
 
-const SESSION_MAX_AGE_MS = 30 * 60 * 1000;
-const IDLE_THRESHOLD_MS = 10 * 1000;
-const FORCE_COMMIT_MS = 5000;
-const SENTENCE_FLUSH_TIMEOUT_MS = 2000;
+const REALTIME_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
+// Refresh the session before the server's age limit, preferably during a pause
+const SESSION_SOFT_MAX_AGE_MS = 25 * 60 * 1000;
+const SESSION_HARD_MAX_AGE_MS = 29 * 60 * 1000;
+const ROTATE_QUIET_MS = 3000;
+const COMMIT_CHECK_INTERVAL_MS = 250;
+const SENTENCE_FLUSH_TIMEOUT_MS = 1500;
 const MAX_WHISPER_CONTEXT = 3;
+// session.update resets are cheap but not free; don't send one per utterance
+const CONTEXT_UPDATE_MIN_INTERVAL_MS = 10 * 1000;
 const MAX_RECENT_TRANSLATIONS = 5;
+const MAX_TRANSLATION_CONTEXT = 3;
 // A transcript arriving with no microphone energy in this window is a silence hallucination.
 const TRANSCRIPT_SPEECH_WINDOW_MS = 8000;
-const TRANSLATION_TIMEOUT_MS = 15000;
+// Translations are emitted in order, so one stuck request holds back the rest:
+// keep each attempt short and retry once instead of waiting a long time.
+const TRANSLATION_ATTEMPT_TIMEOUT_MS = 6000;
+const TRANSLATION_MAX_ATTEMPTS = 2;
 const TRANSLATION_MODEL = 'gpt-4o-mini';
 const TTS_MODEL = 'gpt-4o-mini-tts';
+
+// Server errors that don't affect the session
+const IGNORED_ERROR_FRAGMENTS = ['no active response', 'buffer too small', 'not found'];
 
 export const capabilities = {
   autoDirection: true,
@@ -41,10 +59,19 @@ const bytesToBase64 = (bytes) => {
   return btoa(binary);
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const isRetryableError = (err) =>
+  err?.name === 'AbortError' // attempt timeout
+  || err?.name === 'TypeError' // network failure
+  || err?.status === 429
+  || err?.status >= 500;
+
 /**
- * Engine 1: Whisper + Chat Completions
+ * Engine 1: Realtime transcription + Chat Completions
  * - WebSocket to the GA Realtime API (transcription session) for STT via gpt-4o-transcribe
- * - Chat Completions for translation, emitted strictly in utterance order
+ * - Chat Completions for translation, with the previous lines as reference context,
+ *   emitted strictly in utterance order
  * - Voice mode: streamed PCM from the Speech API, played through onAudioChunk.
  *   TTS runs on its own HTTP stream, so mic capture and playback never block each other.
  */
@@ -52,17 +79,9 @@ export default function useWhisperEngine({
   langA, langB, direction, voiceType, customInstruction, isVoiceMode, speechActivity,
   onTranscript, onTranslation, onAudioChunk, onAudioDone, onStatusChange, onDisconnect,
 }) {
-  // WebSocket state
-  const wsRef = useRef(null);
   const apiKeyRef = useRef(null);
-  const reconnectTimeoutRef = useRef(null);
-  const pingIntervalRef = useRef(null);
-  const sessionRefreshIntervalRef = useRef(null);
-  const isIntentionalCloseRef = useRef(false);
-  const hasRejectedRef = useRef(false);
-  const connectedOnceRef = useRef(false);
-  const lastActivityRef = useRef(Date.now());
-  const sessionStartRef = useRef(Date.now());
+  const hasOpenedRef = useRef(false);
+  const errorShownRef = useRef(false);
 
   // Session generation: bumped on disconnect so late HTTP results are discarded
   const generationRef = useRef(0);
@@ -71,16 +90,17 @@ export default function useWhisperEngine({
   // Translation state
   const recentTranslationsRef = useRef([]);
   const recentTranscriptsRef = useRef([]);
-  const audioItemIdsRef = useRef([]);
+  const translationHistoryRef = useRef([]);
+  const lastContextUpdateAtRef = useRef(0);
   const speakQueueRef = useRef(Promise.resolve());
 
-  // Sentence buffering
+  // Sentence buffering and commit scheduling
   const sentenceBufferRef = useRef('');
   const sentenceFlushTimeoutRef = useRef(null);
-  const forceCommitIntervalRef = useRef(null);
+  const commitCheckIntervalRef = useRef(null);
   const lastCommitAtRef = useRef(0);
 
-  // Store callbacks in refs so WebSocket closures always see latest version
+  // Store callbacks in refs so socket closures always see latest version
   const onTranscriptRef = useRef(onTranscript);
   const onTranslationRef = useRef(onTranslation);
   const onAudioChunkRef = useRef(onAudioChunk);
@@ -110,13 +130,20 @@ export default function useWhisperEngine({
   isVoiceModeRef.current = isVoiceMode;
   speechActivityRef.current = speechActivity;
 
-  const send = useCallback((data) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-      return true;
-    }
-    return false;
-  }, []);
+  // Socket handlers are defined below; the socket reaches them through this ref
+  const socketHandlersRef = useRef({});
+  const socketRef = useRef(null);
+  if (!socketRef.current) {
+    socketRef.current = createRealtimeSocket({
+      url: REALTIME_URL,
+      onOpen: () => socketHandlersRef.current.onOpen?.(),
+      onEvent: (event) => socketHandlersRef.current.onEvent?.(event),
+      onClose: (info) => socketHandlersRef.current.onClose?.(info),
+      onStatus: (state, text) => onStatusChangeRef.current?.(state, text),
+    });
+  }
+
+  const send = useCallback((data) => socketRef.current.send(data), []);
 
   const commitAudio = useCallback(() => {
     const sent = send({ type: 'input_audio_buffer.commit' });
@@ -140,31 +167,13 @@ export default function useWhisperEngine({
     abortControllersRef.current.clear();
   }, []);
 
-  const getTranscriptionConfig = useCallback(() => buildTranscriptionConfig({
+  const getSessionConfig = useCallback(() => buildSessionConfig(buildTranscriptionConfig({
     direction: directionRef.current,
     langA: langARef.current,
     langB: langBRef.current,
     customInstruction: customInstructionRef.current,
     recentTranscripts: recentTranscriptsRef.current,
-  }), []);
-
-  // Build Chat Completions translation prompt
-  const getTranslationPrompt = useCallback(() => {
-    const lA = langARef.current;
-    const lB = langBRef.current;
-    const dir = directionRef.current;
-    const customInstr = customInstructionRef.current;
-
-    let directionRule;
-    if (dir === 'a-to-b') {
-      directionRule = `Translate ${getLanguageName(lA)} to ${getLanguageName(lB)}. Output ONLY in ${getLanguageName(lB)}.`;
-    } else if (dir === 'b-to-a') {
-      directionRule = `Translate ${getLanguageName(lB)} to ${getLanguageName(lA)}. Output ONLY in ${getLanguageName(lA)}.`;
-    } else {
-      directionRule = `Translate between ${getLanguageName(lA)} and ${getLanguageName(lB)}. Detect the input language and output in the OTHER language.`;
-    }
-    return `${directionRule}\n${customInstr ? `DOMAIN: ${customInstr}\n` : ''}Translate exactly. No commentary. Output ONLY the translation in plain text.`;
-  }, []);
+  })), []);
 
   // ---- Voice output: Speech API, streamed PCM16 @ 24kHz ----
   const synthesizeSpeech = useCallback(async (text, generation) => {
@@ -233,51 +242,103 @@ export default function useWhisperEngine({
     orderRef.current = createOrderedEmitter((text) => emitTranslationRef.current(text));
   }
 
+  const requestTranslation = useCallback(async (messages, signal) => {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKeyRef.current}`,
+      },
+      signal,
+      body: JSON.stringify({
+        model: TRANSLATION_MODEL,
+        messages,
+        temperature: 0.2,
+        max_tokens: 600,
+        response_format: TRANSLATION_RESPONSE_FORMAT,
+      }),
+    });
+    if (!response.ok) {
+      const err = new Error(`Translation HTTP ${response.status}`);
+      err.status = response.status;
+      throw err;
+    }
+    const data = await response.json();
+    return parseTranslationContent(data.choices?.[0]?.message?.content);
+  }, []);
+
   const sendForTranslation = useCallback(async (text) => {
     if (!text.trim() || !apiKeyRef.current) return;
+    const generation = generationRef.current;
     const slot = orderRef.current.reserve();
-    const controller = trackRequest();
-    const timeoutId = setTimeout(() => controller.abort(), TRANSLATION_TIMEOUT_MS);
+    const dir = directionRef.current;
+    const lA = langARef.current;
+    const lB = langBRef.current;
+
+    // Previous lines give the model the topic, pronouns and terminology
+    const history = translationHistoryRef.current;
+    const context = history.slice(-MAX_TRANSLATION_CONTEXT);
+    const entry = { source: text, translation: null };
+    history.push(entry);
+    if (history.length > MAX_TRANSLATION_CONTEXT * 2) history.shift();
+
     console.log('[Whisper] Translation #' + slot.index, text.substring(0, 80));
 
     let result = null;
+    let retryTarget = null;
     try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKeyRef.current}`,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: TRANSLATION_MODEL,
-          messages: [
-            { role: 'system', content: getTranslationPrompt() },
-            { role: 'user', content: text },
-          ],
-          temperature: 0.3,
-          max_tokens: 500,
-        }),
-      });
-      if (!response.ok) throw new Error(`Translation HTTP ${response.status}`);
+      for (let attempt = 1; attempt <= TRANSLATION_MAX_ATTEMPTS; attempt++) {
+        if (generation !== generationRef.current) return;
+        const isLastAttempt = attempt === TRANSLATION_MAX_ATTEMPTS;
+        const controller = trackRequest();
+        const timeoutId = setTimeout(() => controller.abort(), TRANSLATION_ATTEMPT_TIMEOUT_MS);
+        try {
+          const raw = await requestTranslation(buildTranslationMessages({
+            text,
+            direction: dir,
+            langA: lA,
+            langB: lB,
+            customInstruction: customInstructionRef.current,
+            context,
+            retryTarget,
+          }), controller.signal);
 
-      const data = await response.json();
-      let translated = data.choices?.[0]?.message?.content?.trim();
-      if (translated && !isAssistantResponse(translated)) {
-        translated = stripSourcePrefix(cleanTranslation(translated))?.trim();
-        if (translated && !isLikelyEcho(translated, text, directionRef.current, langARef.current, langBRef.current)) {
+          if (!raw) break; // empty: filler/noise only
+          if (isAssistantResponse(raw)) {
+            console.warn('[Whisper] Assistant-style reply, retrying:', raw.substring(0, 80));
+            continue;
+          }
+          const translated = stripSourcePrefix(cleanTranslation(raw))?.trim();
+          if (!translated) break;
+
+          if (!isLastAttempt && isLikelyEcho(translated, text, dir, lA, lB)) {
+            retryTarget = resolveTargetLanguage(text, dir, lA, lB);
+            // Keep it as a fallback: showing something beats silently losing the line
+            result = translated;
+            console.warn('[Whisper] Output not in target language, retrying:', translated.substring(0, 80));
+            continue;
+          }
           result = translated;
+          break;
+        } catch (err) {
+          if (generation !== generationRef.current) return;
+          if (isLastAttempt || !isRetryableError(err)) {
+            console.error('[Whisper] Translation error:', err?.message || err);
+            break;
+          }
+          console.warn('[Whisper] Translation attempt failed, retrying:', err?.message || err);
+          await sleep(err?.status === 429 ? 1000 : 300);
+        } finally {
+          clearTimeout(timeoutId);
+          releaseRequest(controller);
         }
       }
-      console.log('[Whisper] Translation result #' + slot.index, result ? result.substring(0, 80) : '(filtered)');
-    } catch (err) {
-      if (err?.name !== 'AbortError') console.error('[Whisper] Translation error:', err);
+      console.log('[Whisper] Translation result #' + slot.index, result ? result.substring(0, 80) : '(none)');
     } finally {
-      clearTimeout(timeoutId);
-      releaseRequest(controller);
+      entry.translation = result;
       orderRef.current.resolve(slot, result);
     }
-  }, [getTranslationPrompt, trackRequest, releaseRequest]);
+  }, [requestTranslation, trackRequest, releaseRequest]);
 
   const processSentenceBuffer = useCallback((force = false) => {
     if (sentenceFlushTimeoutRef.current) {
@@ -307,26 +368,38 @@ export default function useWhisperEngine({
     }
   }, [sendForTranslation]);
 
-  // Force a commit only when the mic actually heard speech since the last commit.
-  // Committing silent buffers is the main source of Whisper hallucinations.
-  const scheduleForceCommit = useCallback(() => {
-    if (forceCommitIntervalRef.current) clearInterval(forceCommitIntervalRef.current);
-    forceCommitIntervalRef.current = setInterval(() => {
-      const tracker = speechActivityRef.current;
-      if (tracker && !tracker.hadSpeechSince(lastCommitAtRef.current)) return;
+  // Runs every COMMIT_CHECK_INTERVAL_MS while listening: commits run-on speech at
+  // a natural gap, and refreshes the session before the server's age limit.
+  const tick = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket.isOpen()) return;
+    const tracker = speechActivityRef.current;
+    const now = Date.now();
+
+    const hadSpeech = tracker ? tracker.hadSpeechSince(lastCommitAtRef.current) : false;
+    const isQuiet = tracker ? !tracker.hadSpeechWithin(COMMIT_GAP_MS, now) : true;
+    if (shouldForceCommit({ sinceCommitMs: now - lastCommitAtRef.current, hadSpeech, isQuiet })) {
       if (commitAudio()) console.log('[Whisper] Forced audio commit');
-    }, FORCE_COMMIT_MS);
+    }
+
+    const age = socket.sessionAgeMs();
+    const longQuiet = tracker ? !tracker.hadSpeechWithin(ROTATE_QUIET_MS, now) : true;
+    if ((age >= SESSION_SOFT_MAX_AGE_MS && longQuiet) || age >= SESSION_HARD_MAX_AGE_MS) {
+      console.log('[Whisper] Refreshing session');
+      socket.rotate();
+    }
   }, [commitAudio]);
 
   const startForceCommitTimer = useCallback(() => {
     lastCommitAtRef.current = Date.now();
-    scheduleForceCommit();
-  }, [scheduleForceCommit]);
+    if (commitCheckIntervalRef.current) clearInterval(commitCheckIntervalRef.current);
+    commitCheckIntervalRef.current = setInterval(tick, COMMIT_CHECK_INTERVAL_MS);
+  }, [tick]);
 
   const stopForceCommitTimer = useCallback(() => {
-    if (forceCommitIntervalRef.current) {
-      clearInterval(forceCommitIntervalRef.current);
-      forceCommitIntervalRef.current = null;
+    if (commitCheckIntervalRef.current) {
+      clearInterval(commitCheckIntervalRef.current);
+      commitCheckIntervalRef.current = null;
     }
     if (sentenceBufferRef.current) processSentenceBuffer(true);
     if (sentenceFlushTimeoutRef.current) {
@@ -345,6 +418,10 @@ export default function useWhisperEngine({
       console.log('[Whisper] Blocked hallucination:', transcript.substring(0, 50));
       return;
     }
+    if (isPromptLeak(transcript, recentTranscriptsRef.current)) {
+      console.log('[Whisper] Blocked prompt leak:', transcript.substring(0, 50));
+      return;
+    }
     if (isRepeatedTranscription(transcript)) {
       console.log('[Whisper] Blocked repeated:', transcript.substring(0, 50));
       return;
@@ -358,18 +435,20 @@ export default function useWhisperEngine({
     if (recentTranscriptsRef.current.length > MAX_WHISPER_CONTEXT) {
       recentTranscriptsRef.current.shift();
     }
-    // Re-send the full input block so language and the custom prompt survive
-    // alongside the rolling context, whatever the server's merge semantics are.
-    send({
-      type: 'session.update',
-      session: buildSessionConfig(getTranscriptionConfig()),
-    });
+    // Rolling context helps recognition of names and terms. Re-send the full
+    // input block so language and the custom prompt survive alongside it.
+    const now = Date.now();
+    if (now - lastContextUpdateAtRef.current >= CONTEXT_UPDATE_MIN_INTERVAL_MS) {
+      if (send({ type: 'session.update', session: getSessionConfig() })) {
+        lastContextUpdateAtRef.current = now;
+      }
+    }
 
     onTranscriptRef.current?.(transcript);
 
     sentenceBufferRef.current = (sentenceBufferRef.current + ' ' + transcript).trim();
     processSentenceBuffer(false);
-  }, [send, getTranscriptionConfig, processSentenceBuffer]);
+  }, [send, getSessionConfig, processSentenceBuffer]);
 
   const handleServerEvent = useCallback((event) => {
     if (event.type === 'error' || event.type === 'session.updated') {
@@ -384,17 +463,16 @@ export default function useWhisperEngine({
 
     switch (event.type) {
       case 'input_audio_buffer.committed':
-        if (event.item_id) audioItemIdsRef.current.push(event.item_id);
         lastCommitAtRef.current = Date.now();
-        if (forceCommitIntervalRef.current) scheduleForceCommit();
         break;
 
       case 'conversation.item.input_audio_transcription.completed': {
         try {
           const transcript = event.transcript?.trim();
-          if (event.item_id) {
-            send({ type: 'conversation.item.delete', item_id: event.item_id });
-            audioItemIdsRef.current = audioItemIdsRef.current.filter(id => id !== event.item_id);
+          if (event.item_id) send({ type: 'conversation.item.delete', item_id: event.item_id });
+          if (errorShownRef.current) {
+            errorShownRef.current = false;
+            onStatusChangeRef.current?.('connected', 'Speak now');
           }
           if (transcript) handleTranscript(transcript);
         } catch (err) {
@@ -405,186 +483,86 @@ export default function useWhisperEngine({
 
       case 'conversation.item.input_audio_transcription.failed':
         console.error('[Whisper] Transcription failed:', event.error?.message);
-        if (event.item_id) {
-          send({ type: 'conversation.item.delete', item_id: event.item_id });
-          audioItemIdsRef.current = audioItemIdsRef.current.filter(id => id !== event.item_id);
-        }
+        if (event.item_id) send({ type: 'conversation.item.delete', item_id: event.item_id });
         break;
 
-      case 'error':
-        if (
-          event.error?.message?.includes('no active response') ||
-          event.error?.message?.includes('buffer too small')
-        ) break;
-        console.error('[Whisper] Server error:', event.error?.message);
-        onStatusChangeRef.current?.('error', event.error?.message || 'Error');
+      case 'error': {
+        const message = event.error?.message || '';
+        if (IGNORED_ERROR_FRAGMENTS.some((f) => message.includes(f))) break;
+        console.error('[Whisper] Server error:', message);
+        errorShownRef.current = true;
+        onStatusChangeRef.current?.('error', message || 'Error');
         break;
+      }
     }
-  }, [send, scheduleForceCommit, handleTranscript]);
+  }, [send, handleTranscript]);
 
-  const _clearSessionState = useCallback(() => {
+  socketHandlersRef.current = {
+    onOpen: () => {
+      send({ type: 'session.update', session: getSessionConfig() });
+      lastCommitAtRef.current = Date.now();
+      lastContextUpdateAtRef.current = Date.now();
+      errorShownRef.current = false;
+      onStatusChangeRef.current?.('connected', hasOpenedRef.current ? 'Speak now' : 'Connected');
+      hasOpenedRef.current = true;
+    },
+    onEvent: handleServerEvent,
+    onClose: ({ intentional }) => {
+      // Don't lose the trailing fragment across a session refresh or drop
+      if (!intentional && sentenceBufferRef.current) processSentenceBuffer(true);
+      onDisconnectRef.current?.();
+    },
+  };
+
+  const clearSessionState = useCallback(() => {
     recentTranslationsRef.current = [];
     recentTranscriptsRef.current = [];
-    audioItemIdsRef.current = [];
+    translationHistoryRef.current = [];
     sentenceBufferRef.current = '';
   }, []);
 
   const connect = useCallback((apiKey) => {
-    return new Promise((resolve, reject) => {
-      if (!apiKey) {
-        onStatusChangeRef.current?.('error', 'API Key missing');
-        reject(new Error('API Key not found'));
-        return;
-      }
-
-      apiKeyRef.current = apiKey;
-      isIntentionalCloseRef.current = false;
-      hasRejectedRef.current = false;
-      connectedOnceRef.current = false;
-
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-
-      if (wsRef.current) {
-        const oldWs = wsRef.current;
-        wsRef.current = null;
-        oldWs.onopen = oldWs.onmessage = oldWs.onerror = oldWs.onclose = null;
-        oldWs.close();
-      }
-
-      const timeoutId = setTimeout(() => {
-        wsRef.current = null;
-        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
-        ws.close();
-        reject(new Error('Connection timeout'));
-      }, 5000);
-
-      // GA Realtime API, transcription-only session (no model responses at all).
-      // Translation and voice output go over separate HTTP requests.
-      const ws = new WebSocket(
-        'wss://api.openai.com/v1/realtime?intent=transcription',
-        ['realtime', `openai-insecure-api-key.${apiKey}`]
-      );
-
-      ws.onopen = () => {
-        clearTimeout(timeoutId);
-        connectedOnceRef.current = true;
-        onStatusChangeRef.current?.('connected', 'Connected');
-
-        ws.send(JSON.stringify({
-          type: 'session.update',
-          session: buildSessionConfig(getTranscriptionConfig()),
-        }));
-
-        pingIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'session.update', session: { type: 'transcription' } }));
-          }
-        }, 30000);
-
-        sessionStartRef.current = Date.now();
-        lastCommitAtRef.current = Date.now();
-        if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
-        sessionRefreshIntervalRef.current = setInterval(() => {
-          if (wsRef.current?.readyState === WebSocket.OPEN && apiKeyRef.current) {
-            const now = Date.now();
-            if (
-              now - sessionStartRef.current >= SESSION_MAX_AGE_MS &&
-              now - lastActivityRef.current >= IDLE_THRESHOLD_MS
-            ) {
-              wsRef.current.close();
-            }
-          }
-        }, 60000);
-
-        resolve(true);
-      };
-
-      ws.onmessage = (e) => {
-        const event = JSON.parse(e.data);
-        handleServerEvent(event);
-      };
-
-      ws.onerror = () => {
-        clearTimeout(timeoutId);
-        if (!connectedOnceRef.current) {
-          hasRejectedRef.current = true;
-          onStatusChangeRef.current?.('error', 'Connection error');
-          reject(new Error('Connection error'));
-        }
-      };
-
-      ws.onclose = () => {
-        clearTimeout(timeoutId);
-        if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
-        if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
-
-        // Reject promise if closed before ever opening (e.g. disconnect() during CONNECTING)
-        if (!connectedOnceRef.current && !hasRejectedRef.current) {
-          hasRejectedRef.current = true;
-          reject(new Error('Connection closed before opening'));
-          return;
-        }
-
-        audioItemIdsRef.current = [];
-        // Don't lose the trailing fragment across a session refresh
-        if (!isIntentionalCloseRef.current && sentenceBufferRef.current) processSentenceBuffer(true);
-        onDisconnectRef.current?.();
-
-        if (!isIntentionalCloseRef.current && !hasRejectedRef.current && apiKeyRef.current) {
-          onStatusChangeRef.current?.('connecting', 'Reconnecting...');
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect(apiKeyRef.current).catch(() => {
-              onStatusChangeRef.current?.('error', 'Reconnect failed');
-            });
-          }, 1500);
-        }
-      };
-
-      wsRef.current = ws;
+    if (!apiKey) {
+      onStatusChangeRef.current?.('error', 'API Key missing');
+      return Promise.reject(new Error('API Key not found'));
+    }
+    apiKeyRef.current = apiKey;
+    hasOpenedRef.current = false;
+    return socketRef.current.connect(apiKey).catch((err) => {
+      onStatusChangeRef.current?.('error', err.message);
+      throw err;
     });
-  }, [getTranscriptionConfig, handleServerEvent, processSentenceBuffer]);
+  }, []);
 
   const disconnect = useCallback(() => {
-    isIntentionalCloseRef.current = true;
     apiKeyRef.current = null;
     generationRef.current += 1;
-    if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
-    if (pingIntervalRef.current) { clearInterval(pingIntervalRef.current); pingIntervalRef.current = null; }
-    if (sessionRefreshIntervalRef.current) { clearInterval(sessionRefreshIntervalRef.current); sessionRefreshIntervalRef.current = null; }
-    if (forceCommitIntervalRef.current) { clearInterval(forceCommitIntervalRef.current); forceCommitIntervalRef.current = null; }
+    if (commitCheckIntervalRef.current) { clearInterval(commitCheckIntervalRef.current); commitCheckIntervalRef.current = null; }
     if (sentenceFlushTimeoutRef.current) { clearTimeout(sentenceFlushTimeoutRef.current); sentenceFlushTimeoutRef.current = null; }
     // Nothing translated or spoken after Stop
     abortAllRequests();
     orderRef.current.reset();
     speakQueueRef.current = Promise.resolve();
-    _clearSessionState();
-    wsRef.current?.close();
-    wsRef.current = null;
-  }, [abortAllRequests, _clearSessionState]);
+    clearSessionState();
+    socketRef.current.disconnect();
+  }, [abortAllRequests, clearSessionState]);
 
   // Cleanup on unmount — prevents timer/WebSocket leaks during hot reload or app teardown
   useEffect(() => {
     return () => {
-      isIntentionalCloseRef.current = true;
       apiKeyRef.current = null;
       generationRef.current += 1;
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-      if (sessionRefreshIntervalRef.current) clearInterval(sessionRefreshIntervalRef.current);
-      if (forceCommitIntervalRef.current) clearInterval(forceCommitIntervalRef.current);
+      if (commitCheckIntervalRef.current) clearInterval(commitCheckIntervalRef.current);
       if (sentenceFlushTimeoutRef.current) clearTimeout(sentenceFlushTimeoutRef.current);
       abortAllRequests();
-      wsRef.current?.close();
+      socketRef.current.disconnect();
     };
   }, [abortAllRequests]);
 
-  const sendAudio = useCallback((base64Audio) => {
-    lastActivityRef.current = Date.now();
-    return send({ type: 'input_audio_buffer.append', audio: base64Audio });
-  }, [send]);
+  // Audio is buffered while the socket reconnects, then flushed in order
+  const sendAudio = useCallback((base64Audio) => (
+    socketRef.current.sendBuffered({ type: 'input_audio_buffer.append', audio: base64Audio })
+  ), []);
 
   return {
     capabilities,

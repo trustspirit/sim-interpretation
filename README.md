@@ -14,11 +14,15 @@ A desktop application for real-time speech recognition and translation. Uses Ope
   - **Standard**: Realtime API transcription (`gpt-4o-transcribe`) + Chat Completions translation. Supports Auto direction, custom instructions and voice choice.
   - **Realtime**: single `gpt-realtime-translate` connection for transcription, translation and speech. Fixed direction only (A → B or B → A); instructions and voice choice do not apply.
 - Translations are always shown in the order the sentences were spoken
+- Continuous speech without pauses is still translated every few seconds (committed at the next short gap, or after 8s at most)
+- Each line is translated with the previous lines as reference context, and the model is constrained to return only a translation (it never answers questions addressed to "you")
+- Dropped connections and session refreshes reconnect automatically with backoff; audio spoken meanwhile is buffered and sent after reconnecting
 
 ### Hallucination Guards
 - Silent audio is never force-committed, and transcripts that arrive without microphone activity are dropped
 - Known Whisper artifacts and streaming outros ("thanks for watching", "구독과 좋아요…") are filtered
-- Repeated transcripts and the app's own spoken output picked up by the mic are ignored
+- Repeated transcripts, the transcription prompt read back on silence, and the app's own spoken output picked up by the mic are ignored
+- The speech detector adapts to quiet microphones and loopback devices
 
 ### Supported Languages
 - English

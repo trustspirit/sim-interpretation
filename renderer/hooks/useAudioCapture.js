@@ -60,7 +60,22 @@ export default function useAudioCapture({
       }
 
       mediaStreamRef.current = stream;
+      // Unplugged or revoked microphone: surface it instead of silently sending nothing
+      stream.getAudioTracks().forEach((track) => {
+        track.onended = () => {
+          if (isActiveRef.current && currentCaptureId === captureIdRef.current) {
+            onError?.('Microphone disconnected');
+          }
+        };
+      });
       audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+      // The OS can suspend the context (device switch, sleep); resume while capturing
+      const ctx = audioContextRef.current;
+      ctx.onstatechange = () => {
+        if (ctx.state === 'suspended' && isActiveRef.current && currentCaptureId === captureIdRef.current) {
+          ctx.resume().catch(() => {});
+        }
+      };
       await audioContextRef.current.audioWorklet.addModule('audio-processor.js');
 
       if (currentCaptureId !== captureIdRef.current) {

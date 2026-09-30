@@ -103,20 +103,23 @@ export const isHallucination = (text) => {
   return false;
 };
 
-// Repetition detector for transcriptions (hallucination often repeats)
+// Repetition detector for transcriptions (silence hallucinations loop the same line).
+// Only repeats close together in time count, so a speaker saying "Yes." now and
+// then over a meeting is never blocked.
 const recentTranscriptions = [];
 const MAX_RECENT = 5;
 const REPEAT_THRESHOLD = 2; // Same text appearing this many times = hallucination
+const REPEAT_WINDOW_MS = 30 * 1000;
 
-export const isRepeatedTranscription = (text) => {
+export const isRepeatedTranscription = (text, now = Date.now()) => {
   if (!text) return false;
   const normalized = text.trim().toLowerCase();
 
-  // Count occurrences in recent transcriptions
-  const count = recentTranscriptions.filter(t => t === normalized).length;
+  const count = recentTranscriptions
+    .filter((t) => t.text === normalized && now - t.at <= REPEAT_WINDOW_MS)
+    .length;
 
-  // Add to recent list
-  recentTranscriptions.push(normalized);
+  recentTranscriptions.push({ text: normalized, at: now });
   if (recentTranscriptions.length > MAX_RECENT) {
     recentTranscriptions.shift();
   }
@@ -145,140 +148,36 @@ export const isTranslationEcho = (transcript, recentTranslations) => {
   });
 };
 
-// Patterns that indicate the model is responding as an assistant instead of translating
+// The transcription prompt carries recent transcripts as context. On silence or
+// noise the model sometimes "transcribes" that prompt back; drop such repeats.
+const PROMPT_LEAK_MIN_CHARS = 12;
+
+export const isPromptLeak = (transcript, promptContext) => {
+  if (!transcript || !promptContext?.length) return false;
+  const needle = normalizeForEcho(transcript);
+  if (needle.length < PROMPT_LEAK_MIN_CHARS) return false;
+  return normalizeForEcho(promptContext.join(' ')).includes(needle);
+};
+
+// The model answering or refusing instead of translating. Keep this list to
+// meta-statements about the task itself: ordinary phrases ("Of course",
+// "것 같아요", "I see") are things real speakers say and must be translated.
 const assistantResponsePatterns = [
-  // Apologies and refusals
-  /^I'm sorry/i,
-  /^I apologize/i,
-  /^I can't assist/i,
-  /^I cannot assist/i,
-  /^I'm unable to/i,
-  /^I am unable to/i,
-
-  // Hearing/clarity issues
-  /^I couldn't clearly hear/i,
-  /^I didn't catch/i,
-  /^I didn't hear/i,
-  /^I couldn't hear/i,
-  /^There was no speech/i,
-  /^No speech detected/i,
-  /^I don't hear/i,
-
-  // Self-referential translator statements
-  /^I can only assist with translation/i,
-  /^I can only continue translating/i,
-  /^I can only translate/i,
-  /^I'm here to translate/i,
-  /^I am here to translate/i,
-  /^I'll translate/i,
-  /^I will translate/i,
-  /^I'm ready to translate/i,
-  /^I am ready to translate/i,
-  /^I'm listening/i,
-  /^I am listening/i,
-
-  // Requests to speak/continue
-  /^Please continue speaking/i,
-  /^Please go ahead/i,
-  /^Please feel free/i,
-  /^Please speak/i,
-  /^Please say/i,
-  /^Please provide/i,
-  /^Could you please repeat/i,
-  /^Can you repeat/i,
-  /whenever you're ready/i,
-  /whenever you are ready/i,
-
-  // Goodbye/ending statements
-  /^Got it\. I'll stop/i,
-  /^Got it\. I will stop/i,
-  /^I'll stop translating/i,
-  /^I will stop translating/i,
-  /^Goodbye/i,
-  /^Bye/i,
-  /^Take care/i,
-  /if you need anything/i,
-  /feel free to ask/i,
-
-  // General assistant behavior
-  /^Let me know if/i,
-  /^How can I help/i,
-  /^How may I help/i,
-  /^What can I help/i,
-  /^Is there anything/i,
-  /^Do you need/i,
-  /^Would you like/i,
-  /^Sure thing/i,
-  /^Of course/i,
-  /^Certainly/i,
-  /^Absolutely/i,
-  /^Sure,/i,
-  /^Okay,/i,
-  /^Alright,/i,
-  /^Understood/i,
-  /^Got it/i,
-  /^No problem/i,
-  /^I understand/i,
-  /^I see/i,
-  /^Great!/i,
-  /^Perfect!/i,
-
-  // Offering to do something (assistant interpreting as request)
-  /^I'll do that/i,
-  /^I'll take care/i,
-  /^I'll handle/i,
-  /^I can do that/i,
-  /^I can help/i,
-  /^Let me help/i,
-  /^Allow me to/i,
-
-  // Meta responses about translation
-  /^Nothing to translate/i,
-  /^No translation needed/i,
-  /^Unable to translate/i,
-  /^Cannot translate/i,
-  /^No speech/i,
-  /^No audio/i,
-  /^I didn't receive/i,
-  /^There is nothing/i,
-  /^There was nothing/i,
-  /^Empty input/i,
-  /^No input/i,
-  /^번역할 내용이 없/,
-  /^번역할 것이 없/,
-  /^입력이 없/,
-
-  // Korean assistant responses
-  /^죄송합니다/,
-  /^말씀하세요/,
-  /^듣고 있습니다/,
-  /^번역을 시작/,
-  /^번역해 드리겠습니다/,
-  /^안녕히 가세요/,
-  /^다음에 또/,
-  /도움이 필요하시면/,
-  /^네,? 알겠습니다/,
-  /^네,? 제가/,
-  /^알겠습니다/,
-  /^그렇게 하겠습니다/,
-  /^도와드리겠습니다/,
-  // Korean conversational/assistant patterns
-  /^아,/,
-  /^오,/,
-  /^음,/,
-  /^네!/,
-  /^좋아요/,
-  /^그렇군요/,
-  /궁금하신/,
-  /거군요/,
-  /것 같아요/,
-  /있을 것 같/,
-  /해볼게요/,
-  /해드릴게요/,
-  /알려드릴게요/,
-  /정리해/,
-  /설명해/,
-  /도와드릴/,
+  /^(I'm sorry|I apologize|Sorry),? (but )?I (can't|cannot|am unable to|'m unable to) (assist|help|translate|provide|comply)/i,
+  /^As an AI\b/i,
+  /^I('m| am) (an AI|a language model|here to (help|translate)|ready to translate)/i,
+  /^I can only (assist with )?(translate|translation)/i,
+  /^(Please )?provide (the )?(text|sentence|content) (you('d| would) like|to (be )?translate)/i,
+  /^(There is|There's) no (text|speech|content|input) to translate/i,
+  /^(Nothing|No text|No content) to translate/i,
+  /^(The )?(input|source) (text )?(is|was|appears to be) (empty|incomplete|unclear)/i,
+  /^I (didn't|did not|couldn't|could not) (catch|hear|understand) (that|the audio|what)/i,
+  /^Here is the translation/i,
+  /^Translation:/i,
+  /^번역할 (내용|텍스트|문장)이 없/,
+  /^번역(해 드리겠습니다|을 시작하겠습니다)/,
+  /^(저는|나는) (AI|인공지능|번역 (도우미|어시스턴트))/,
+  /^입력(된 내용)?이 없/,
 ];
 
 // Check if translation output is an unwanted assistant response
@@ -288,49 +187,47 @@ export const isAssistantResponse = (text) => {
   return assistantResponsePatterns.some((pattern) => pattern.test(trimmed));
 };
 
-// Patterns that indicate assistant content was appended to a translation
+// Assistant boilerplate appended after a translation. Only unambiguous
+// assistant offers; anything a person might say in a meeting stays.
 const trailingAssistantPatterns = [
-  // English trailing patterns
-  /\. How can I help/i,
-  /\. What (else )?can I/i,
-  /\. Is there anything/i,
-  /\. Let me know/i,
-  /\. Feel free/i,
-  /\. I('m| am) here/i,
-  /\. I('ll| will) help/i,
-  /\. Would you like/i,
-  /\. Do you need/i,
-  /\. If you need/i,
-  /\. Please let me/i,
-  // Korean trailing patterns
-  /\. 도움이 필요하시면/,
-  /\. 더 궁금한/,
-  /\. 말씀해 주세요/,
-  /\. 알려주세요/,
-  /\. 도와드릴까요/,
-  /\. 필요하시면/,
-  /\. 있으시면/,
-  /! 좋아요/,
-  /! 네/,
+  /[.!?]\s+(How (else )?can I (help|assist)( you)?( today)?\??)$/i,
+  /[.!?]\s+(Is there anything else I can (help|assist)( you)? with\??)$/i,
+  /[.!?]\s+(Let me know if you need (any )?(more|further|other) (help|assistance|translations?)\.?)$/i,
+  /[.!?]\s+(Feel free to ask if you (have|need) (any )?(more|other) (questions|help)\.?)$/i,
+  /[.!?]\s+(더 (도움이 필요하시면|궁금한 점이 있으시면) (언제든지 )?(말씀해 주세요|알려주세요)[.!]?)$/,
 ];
 
-// Detect primary script of text (korean, japanese, chinese, latin, or other)
+// Primary script of text. CJK characters are weighted because one character
+// carries roughly what 2-3 Latin letters do, so "Kubernetes 클러스터를 배포했어요"
+// still reads as Korean.
+const CJK_WEIGHT = 2.5;
+
 export const detectPrimaryScript = (text) => {
   if (!text) return 'unknown';
   const cleaned = text.replace(/[\s\d\p{P}\p{S}]/gu, '');
   if (cleaned.length === 0) return 'unknown';
 
-  const koreanChars = (cleaned.match(/[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/g) || []).length;
-  const japaneseChars = (cleaned.match(/[\u3040-\u309F\u30A0-\u30FF]/g) || []).length;
-  const cjkChars = (cleaned.match(/[\u4E00-\u9FFF\u3400-\u4DBF]/g) || []).length;
-  const latinChars = (cleaned.match(/[a-zA-Z\u00C0-\u024F]/g) || []).length;
+  const korean = (cleaned.match(/[가-힯ᄀ-ᇿ㄰-㆏]/g) || []).length;
+  const kana = (cleaned.match(/[぀-ゟ゠-ヿ]/g) || []).length;
+  const han = (cleaned.match(/[一-鿿㐀-䶿]/g) || []).length;
+  const latin = (cleaned.match(/[a-zA-ZÀ-ɏ]/g) || []).length;
 
-  if (koreanChars / cleaned.length > 0.3) return 'korean';
-  // Japanese: any kana present with CJK = japanese (e.g. "東京に行きます")
-  if (japaneseChars > 0 && (japaneseChars + cjkChars) / cleaned.length > 0.3) return 'japanese';
-  if (cjkChars / cleaned.length > 0.3) return 'chinese';
-  if (latinChars / cleaned.length > 0.3) return 'latin';
-  return 'other';
+  const scores = {
+    korean: korean * CJK_WEIGHT,
+    // Any kana means Japanese; Han characters then count toward Japanese too
+    japanese: kana > 0 ? (kana + han) * CJK_WEIGHT : 0,
+    chinese: kana > 0 ? 0 : han * CJK_WEIGHT,
+    latin,
+  };
+  let best = 'other';
+  let bestScore = 0;
+  for (const [script, score] of Object.entries(scores)) {
+    if (score > bestScore) {
+      best = script;
+      bestScore = score;
+    }
+  }
+  return best;
 };
 
 // Expected script for language codes
@@ -344,38 +241,43 @@ const langScriptMap = {
   tr: 'latin', vi: 'latin', id: 'latin', ms: 'latin',
 };
 
-// Check if translation output is likely an untranslated echo
+export const scriptForLanguage = (code) => langScriptMap[code] || null;
+
+/**
+ * True when the output is clearly not in the language it should be in (the model
+ * echoed the source untranslated). Only decidable when the two languages use
+ * different scripts; English ↔ Spanish can't be told apart this way.
+ */
 export const isLikelyEcho = (translatedText, originalText, direction, langA, langB) => {
   const outputScript = detectPrimaryScript(translatedText);
   if (outputScript === 'unknown' || outputScript === 'other') return false;
 
-  if (direction === 'a-to-b') {
-    const expectedScript = langScriptMap[langB];
-    if (expectedScript && outputScript !== expectedScript) return true;
-  } else if (direction === 'b-to-a') {
-    const expectedScript = langScriptMap[langA];
-    if (expectedScript && outputScript !== expectedScript) return true;
-  } else {
-    // Auto mode: output should differ from input script
-    const inputScript = detectPrimaryScript(originalText);
-    if (inputScript !== 'unknown' && inputScript !== 'other' && outputScript === inputScript) return true;
-  }
+  const scriptA = scriptForLanguage(langA);
+  const scriptB = scriptForLanguage(langB);
+  if (!scriptA || !scriptB || scriptA === scriptB) return false;
+
+  if (direction === 'a-to-b') return outputScript !== scriptB;
+  if (direction === 'b-to-a') return outputScript !== scriptA;
+
+  // Auto: the output must be in the script of the other language
+  const inputScript = detectPrimaryScript(originalText);
+  if (inputScript === scriptA) return outputScript !== scriptB;
+  if (inputScript === scriptB) return outputScript !== scriptA;
   return false;
 };
 
-// Strip "original -> translation" format, keeping only the translation part
+// Strip "original -> translation" format, keeping only the translation part.
+// Arrows only: a colon is ordinary punctuation inside real translations.
 export const stripSourcePrefix = (text) => {
   if (!text) return text;
-  // Match patterns like: "원문" -> "translation" or 원문 → translation
-  const arrowMatch = text.match(/^.+?\s*(?:->|→|=>|：|:)\s*[""]?(.+?)[""]?\s*$/s);
+  const arrowMatch = text.match(/^(.+?)\s*(?:->|→|=>)\s*["“]?(.+?)["”]?\s*$/s);
   if (arrowMatch) {
-    const before = text.substring(0, text.indexOf(arrowMatch[1]));
-    const after = arrowMatch[1];
-    // Only strip if the before part contains a different script (i.e., it's the source text)
+    const [, before, after] = arrowMatch;
+    // Only strip if the before part is in a different script (i.e. it's the source text)
     const beforeScript = detectPrimaryScript(before);
     const afterScript = detectPrimaryScript(after);
     if (beforeScript !== 'unknown' && afterScript !== 'unknown' && beforeScript !== afterScript) {
-      return after.replace(/[""]$/,'').trim();
+      return after.trim();
     }
   }
   return text;
@@ -385,11 +287,11 @@ export const stripSourcePrefix = (text) => {
 export const cleanTranslation = (text) => {
   if (!text) return text;
   let cleaned = text.trim();
-  const normalized = normalizeQuotes(cleaned);
 
   for (const pattern of trailingAssistantPatterns) {
-    const match = normalized.match(pattern);
+    const match = normalizeQuotes(cleaned).match(pattern);
     if (match) {
+      // Keep the sentence terminator that precedes the appended boilerplate
       cleaned = cleaned.substring(0, match.index + 1).trim();
     }
   }

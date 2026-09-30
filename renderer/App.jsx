@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 
 // Components
 import { Header, LanguageBar, ControlBar } from './components/layout';
@@ -18,8 +18,10 @@ import useTranslationEngine from './hooks/useTranslationEngine';
 import { createSpeechActivityTracker } from './utils/speechActivity';
 import { resolveLanguagePair } from './utils/languagePair';
 
-// Mic peak level (0..1) above which a chunk counts as speech
+// Mic peak level (0..1) above which a chunk counts as speech (adapts downward for quiet mics)
 const SPEECH_THRESHOLD = 0.06;
+// In voice mode subtitles wait for speech to start; don't wait forever if TTS fails
+const SUBTITLE_AUDIO_WAIT_MS = 3000;
 
 export default function App() {
   // Language settings (persisted; A and B can never be the same language)
@@ -84,6 +86,39 @@ export default function App() {
     ttsEndTimeoutRef: voice.ttsEndTimeoutRef,
   });
 
+  // Feed each translation to the subtitle queue as it arrives. (Diffing the
+  // capped translatedText array missed items and stalled after 50 entries.)
+  const subtitleRef = useRef(subtitle);
+  subtitleRef.current = subtitle;
+  const subtitleWaitTimeoutRef = useRef(null);
+  const { handleTranslation: appendTranslation } = translationSession;
+  const handleTranslation = useCallback((text) => {
+    appendTranslation(text);
+    if (!ui.isSubtitleModeRef.current) return;
+
+    const sub = subtitleRef.current;
+    sub.addTranslation(text);
+    if (sub.isProcessing()) return;
+
+    if (voice.isVoiceModeRef.current && !realtimeAudio.isPlaying()) {
+      // Start with the voice (handleAudioChunk), or after a grace period without it
+      sub.setPendingStart(true);
+      clearTimeout(subtitleWaitTimeoutRef.current);
+      subtitleWaitTimeoutRef.current = setTimeout(() => {
+        const current = subtitleRef.current;
+        if (current.isPendingStart()) {
+          current.setPendingStart(false);
+          current.startProcessing();
+        }
+      }, SUBTITLE_AUDIO_WAIT_MS);
+      return;
+    }
+    sub.setPendingStart(false);
+    sub.startProcessing();
+  }, [appendTranslation, ui.isSubtitleModeRef, voice.isVoiceModeRef, realtimeAudio]);
+
+  useEffect(() => () => clearTimeout(subtitleWaitTimeoutRef.current), []);
+
   // Translation engine — selected by mode, routes audio → transcript → translation
   const engine = useTranslationEngine({
     mode: translationMode,
@@ -93,7 +128,7 @@ export default function App() {
     isVoiceMode: voice.isVoiceMode,
     speechActivity,
     onTranscript: translationSession.handleTranscript,
-    onTranslation: translationSession.handleTranslation,
+    onTranslation: handleTranslation,
     onAudioChunk: translationSession.handleAudioChunk,
     onAudioDone: translationSession.handleAudioDone,
     onStatusChange: updateStatus,
@@ -171,30 +206,6 @@ export default function App() {
     return () => voice.cleanupTTS();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Process translations into subtitle queue
-  useEffect(() => {
-    if (!ui.isSubtitleMode) return;
-
-    const latestIndex = translationSession.translatedText.length - 1;
-    if (latestIndex < 0 || latestIndex <= subtitle.getLastProcessedIndex()) return;
-
-    const newText = translationSession.translatedText[latestIndex];
-    subtitle.setLastProcessedIndex(latestIndex);
-    subtitle.addTranslation(newText);
-
-    if (!subtitle.isProcessing()) {
-      if (voice.isVoiceModeRef.current) {
-        subtitle.setPendingStart(true);
-        if (realtimeAudio.isPlaying()) {
-          subtitle.startProcessing();
-          subtitle.setPendingStart(false);
-        }
-      } else {
-        subtitle.startProcessing();
-      }
-    }
-  }, [ui.isSubtitleMode, translationSession.translatedText, subtitle, realtimeAudio]);
 
   // Subtitle Mode
   if (ui.isSubtitleMode) {

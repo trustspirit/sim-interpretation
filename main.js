@@ -23,6 +23,14 @@ const webPreferences = {
   sandbox: true,
 };
 
+// The interpreter keeps working while its window is hidden behind a video call
+// or minimized. Chromium otherwise throttles background timers (down to once a
+// minute), which stalls audio commits, transcript flushes and reconnects.
+const mainWebPreferences = {
+  ...webPreferences,
+  backgroundThrottling: false,
+};
+
 function createSettingsWindow() {
   if (settingsWindow) {
     settingsWindow.focus();
@@ -73,7 +81,7 @@ async function createWindow() {
     backgroundColor: '#00000000',
     hasShadow: true,
     icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'icon.icns' : 'icon.png'),
-    webPreferences,
+    webPreferences: mainWebPreferences,
   });
 
   mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
