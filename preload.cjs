@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleSubtitleMode: (position) => ipcRenderer.invoke('toggle-subtitle-mode', position),
   updateSubtitlePosition: (position) => ipcRenderer.invoke('update-subtitle-position', position),
   getSubtitleMode: () => ipcRenderer.invoke('get-subtitle-mode'),
+  // Session
+  setKeepAwake: (enabled) => ipcRenderer.invoke('set-keep-awake', !!enabled),
   // DevTools
   toggleDevTools: () => ipcRenderer.send('toggle-devtools')
 });

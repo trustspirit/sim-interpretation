@@ -179,5 +179,11 @@ export default function useRealtimeAudio() {
     setOutputDevice,
     isPlaying: () => isPlayingRef.current,
     isEnabled: () => isEnabledRef.current,
+    // How much scheduled audio is still to be heard
+    remainingMs: () => {
+      const ctx = outputAudioContextRef.current;
+      if (!ctx) return 0;
+      return Math.max(0, (nextPlayTimeRef.current - ctx.currentTime) * 1000);
+    },
   }), [playAudioChunk, stopAudio, stopPlayback, onAudioDone, setEnabled, setOutputDevice]);
 }

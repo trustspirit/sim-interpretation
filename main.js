@@ -1,4 +1,4 @@
-import { app, BrowserWindow, systemPreferences, session, ipcMain, screen, safeStorage } from 'electron';
+import { app, BrowserWindow, systemPreferences, session, ipcMain, screen, safeStorage, powerSaveBlocker } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -157,6 +157,19 @@ ipcMain.on('toggle-devtools', () => {
 
 ipcMain.on('close-settings', () => {
   settingsWindow?.close();
+});
+
+// While a session runs, keep the OS from suspending the app (and its audio)
+// when the machine idles during a long meeting.
+let keepAwakeId = null;
+ipcMain.handle('set-keep-awake', (event, enabled) => {
+  if (enabled && keepAwakeId === null) {
+    keepAwakeId = powerSaveBlocker.start('prevent-app-suspension');
+  } else if (!enabled && keepAwakeId !== null) {
+    powerSaveBlocker.stop(keepAwakeId);
+    keepAwakeId = null;
+  }
+  return { success: true };
 });
 
 // API key: stored encrypted with safeStorage in userData, .env as fallback

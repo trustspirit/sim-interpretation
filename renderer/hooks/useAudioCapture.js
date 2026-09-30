@@ -23,7 +23,8 @@ export default function useAudioCapture({
   selectedMic,
   speechActivity,
   onAudioData,
-  onError
+  onError,
+  onEnded,
 }) {
   const audioContextRef = useRef(null);
   const mediaStreamRef = useRef(null);
@@ -67,7 +68,7 @@ export default function useAudioCapture({
       stream.getAudioTracks().forEach((track) => {
         track.onended = () => {
           if (isActiveRef.current && currentCaptureId === captureIdRef.current) {
-            onError?.('Microphone disconnected');
+            onEnded?.('Microphone disconnected');
           }
         };
       });
@@ -105,10 +106,10 @@ export default function useAudioCapture({
 
       return true;
     } catch (error) {
-      onError?.('Mic access denied');
+      onError?.(error?.name === 'NotFoundError' ? 'No microphone found' : 'Mic access denied');
       return false;
     }
-  }, [selectedMic, speechActivity, onAudioData, onError]);
+  }, [selectedMic, speechActivity, onAudioData, onError, onEnded]);
 
   const stopCapture = useCallback(() => {
     isActiveRef.current = false;

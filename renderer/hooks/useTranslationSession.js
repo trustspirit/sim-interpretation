@@ -49,14 +49,16 @@ export default function useTranslationSession({
     }
   }, [realtimeAudio, subtitle, isVoiceModeRef, isSubtitleModeRef, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef]);
 
-  // Called by engine when a TTS audio stream ends
+  // Called by engine when a TTS audio stream ends. The stream finishes
+  // downloading before it finishes playing, so wait for the scheduled audio.
   const handleAudioDone = useCallback(() => {
     realtimeAudio.onAudioDone();
+    if (ttsEndTimeoutRef.current) clearTimeout(ttsEndTimeoutRef.current);
     ttsEndTimeoutRef.current = setTimeout(() => {
       ttsEndTimeoutRef.current = null;
       isSpeakingTTSRef.current = false;
       setIsSpeakingTTS(false);
-    }, 500);
+    }, realtimeAudio.remainingMs() + 300);
   }, [realtimeAudio, isSpeakingTTSRef, setIsSpeakingTTS, ttsEndTimeoutRef]);
 
   // Called by engine on WebSocket disconnect

@@ -243,6 +243,12 @@ export default function useRealtimeTranslateEngine({
     },
   };
 
+  // Direction or languages changed from the Settings window while listening
+  useEffect(() => {
+    if (!socketRef.current.isOpen()) return;
+    send({ type: 'session.update', session: { audio: { output: { language: getTargetLanguage() } } } });
+  }, [langA, langB, direction, send, getTargetLanguage]);
+
   // Refresh the session before the server's age limit, preferably during a pause
   const checkSession = useCallback(() => {
     const socket = socketRef.current;

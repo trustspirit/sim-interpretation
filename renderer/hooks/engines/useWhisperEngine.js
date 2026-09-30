@@ -593,6 +593,12 @@ export default function useWhisperEngine({
     },
   };
 
+  // The Settings window can change direction or the glossary while listening;
+  // the next pause re-sends the transcription config with the new values.
+  useEffect(() => {
+    contextDirtyRef.current = true;
+  }, [langA, langB, direction, customInstruction]);
+
   const clearSessionState = useCallback(() => {
     recentTranslationsRef.current = [];
     recentTranscriptsRef.current = [];

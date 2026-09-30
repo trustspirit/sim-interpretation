@@ -1,4 +1,8 @@
 import { useRef, useEffect, useCallback } from 'react';
+
+const SWITCH_MAX_ATTEMPTS = 3;
+const SWITCH_RETRY_DELAY_MS = 1500;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 import useWhisperEngine from './engines/useWhisperEngine';
 import useRealtimeTranslateEngine from './engines/useRealtimeTranslateEngine';
 
@@ -20,6 +24,10 @@ export default function useTranslationEngine({
 
   const whisper = useWhisperEngine(sharedParams);
   const realtimeTranslate = useRealtimeTranslateEngine(sharedParams);
+  // Engine objects are recreated every render; the switch effect must only
+  // react to the mode itself, or a status re-render would cancel the switch
+  const enginesRef = useRef({ whisper, realtimeTranslate });
+  enginesRef.current = { whisper, realtimeTranslate };
 
   // Track whether we currently have an active connection and with which API key
   const isConnectedRef = useRef(false);
@@ -36,22 +44,40 @@ export default function useTranslationEngine({
 
     if (!isConnectedRef.current || !apiKeyRef.current) return;
 
-    const oldEngine = prevMode === 'whisper' ? whisper : realtimeTranslate;
-    const newEngine = mode === 'whisper' ? whisper : realtimeTranslate;
+    const engines = enginesRef.current;
+    const oldEngine = prevMode === 'whisper' ? engines.whisper : engines.realtimeTranslate;
+    const newEngine = mode === 'whisper' ? engines.whisper : engines.realtimeTranslate;
 
     console.log(`[TranslationEngine] Switching mode: ${prevMode} → ${mode}`);
     onStatusChangeRef.current?.('connecting', 'Switching mode...');
     oldEngine.stopForceCommitTimer();
     oldEngine.disconnect();
-    newEngine.connect(apiKeyRef.current)
-      .then(() => {
-        newEngine.startForceCommitTimer();
-        onStatusChangeRef.current?.('connected', 'Speak now');
-      })
-      .catch(() => {
-        onStatusChangeRef.current?.('error', 'Mode switch failed');
-      });
-  }, [mode, whisper, realtimeTranslate]);
+
+    const apiKey = apiKeyRef.current;
+    let cancelled = false;
+    (async () => {
+      for (let attempt = 1; attempt <= SWITCH_MAX_ATTEMPTS; attempt++) {
+        try {
+          await newEngine.connect(apiKey);
+          if (cancelled) { newEngine.disconnect(); return; }
+          newEngine.startForceCommitTimer();
+          onStatusChangeRef.current?.('connected', 'Speak now');
+          return;
+        } catch (err) {
+          if (cancelled) return;
+          console.warn(`[TranslationEngine] Switch attempt ${attempt} failed:`, err?.message);
+          if (attempt < SWITCH_MAX_ATTEMPTS) {
+            onStatusChangeRef.current?.('connecting', `Switching mode (retry ${attempt}/${SWITCH_MAX_ATTEMPTS - 1})...`);
+            await sleep(SWITCH_RETRY_DELAY_MS);
+          }
+        }
+      }
+      if (!cancelled) onStatusChangeRef.current?.('error', 'Mode switch failed — press Stop and Start again');
+    })();
+
+    // A further mode change or Stop cancels this switch
+    return () => { cancelled = true; };
+  }, [mode]);
 
   const activeEngine = mode === 'whisper' ? whisper : realtimeTranslate;
 

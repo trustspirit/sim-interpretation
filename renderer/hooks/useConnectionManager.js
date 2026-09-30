@@ -23,16 +23,24 @@ export default function useConnectionManager({
 
   const engineRef = useRef(engine);
   engineRef.current = engine;
+  const stopListeningRef = useRef(null);
+  const captureErrorRef = useRef('');
 
   const audioCapture = useAudioCapture({
     selectedMic,
     speechActivity,
     onAudioData: (base64Audio) => engineRef.current.sendAudio(base64Audio),
-    onError: (msg) => updateStatus('error', msg),
+    onError: (msg) => { captureErrorRef.current = msg; },
+    // The device went away mid-session: end the session instead of listening to nothing
+    onEnded: (msg) => {
+      stopListeningRef.current?.();
+      updateStatus('error', msg);
+    },
   });
 
   const stopListening = useCallback(() => {
     attemptGenerationRef.current += 1;
+    window.electronAPI?.setKeepAwake?.(false);
     isListeningRef.current = false;
     isConnectingRef.current = false;
     setIsListening(false);
@@ -46,6 +54,7 @@ export default function useConnectionManager({
     onStop?.();
     updateStatus('ready', 'Ready');
   }, [audioCapture, speechActivity, onStop, updateStatus]);
+  stopListeningRef.current = stopListening;
 
   const startListening = useCallback(async () => {
     if (isListeningRef.current || isConnectingRef.current) return;
@@ -74,11 +83,13 @@ export default function useConnectionManager({
         if (cancelled()) { engineRef.current.disconnect(); return; }
         console.log('[Start] Connected successfully');
 
+        captureErrorRef.current = '';
         const audioStarted = await audioCapture.startCapture();
         if (cancelled()) { audioCapture.stopCapture(); engineRef.current.disconnect(); return; }
         console.log('[Start] Audio capture:', audioStarted);
         if (!audioStarted) {
           stopListening();
+          updateStatus('error', captureErrorRef.current || 'Microphone unavailable');
           return;
         }
 
@@ -88,6 +99,7 @@ export default function useConnectionManager({
         setIsConnecting(false);
         audioCapture.startVisualization(setAudioLevel);
         engineRef.current.startForceCommitTimer?.();
+        window.electronAPI?.setKeepAwake?.(true);
         updateStatus('connected', 'Speak now');
         return;
       } catch (err) {
